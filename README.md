@@ -28,3 +28,6 @@ the old index and swap in the new index. Writes that occur during an index
 operation are preserved as unsorted entries in the new index.
 
 Locking for writes and indexing is accomplished via `flock(2)`.
+
+I wrote this in one sitting and there are probably many bugs. Thorough testing
+is a TODO.
