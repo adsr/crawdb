@@ -22,9 +22,9 @@ as a fallback on the unsorted records at the end of the index file.
 crawdb supports writes by appending unsorted entries at the end of the index
 file.
 
-A crawdb may be indexed (sorted) so that keys may be found via binary search.
-Indexing can happen "online" and should only hold a lock briefly to copy and
-swap in the new index. Writes that occur during an index operation are preserved
-as unsorted entries in the new index.
+A crawdb may be indexed (sorted) to make unsorted keys searchable via binary
+search. Indexing can happen "online" and should only hold a lock briefly to copy
+the old index and swap in the new index. Writes that occur during an index
+operation are preserved as unsorted entries in the new index.
 
 Locking for writes and indexing is accomplished via `flock(2)`.
