@@ -1,7 +1,7 @@
 #include "crawdb.h"
 
 static int _crawdb_reload_for_index(crawdb_t *craw);
-static int _crawdb_new_or_open(int is_new, int for_index, crawdb_t *reload, char *path_idx, char *path_dat, uint32_t nkey, crawdb_t **out_craw);
+static int _crawdb_open(int is_new, int for_index, crawdb_t *reload, char *idx_path, char *dat_path, uint32_t nkey, crawdb_t **out_craw);
 static int _crawdb_get_bsearch(crawdb_t *craw, uchar *key, uint32_t nkey, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum);
 static int _crawdb_get_lsearch(crawdb_t *craw, uchar *key, uint32_t nkey, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum);
 static int _crawdb_get_data(crawdb_t *craw, uint64_t offset, uint32_t len, uint16_t cksum, uchar **out_val, uint32_t *out_nval);
@@ -10,37 +10,41 @@ static int _crawdb_index_sort(crawdb_t *craw, char *path_copy, int *inout_fd_cop
 static int _crawdb_index_swap(crawdb_t *craw, char *path_new, int fd_new, long size_new);
 static int _crawdb_lock(crawdb_t *craw);
 static int _crawdb_unlock(crawdb_t *craw);
+static int _crawdb_unlock_if_locked(crawdb_t *craw);
 
-int crawdb_new(char *path_idx, char *path_dat, uint32_t nkey, crawdb_t **out_craw) {
-    return _crawdb_new_or_open(1, 0, NULL, path_idx, path_dat, nkey, out_craw);
+int crawdb_new(char *idx_path, char *dat_path, uint32_t nkey, crawdb_t **out_craw) {
+    return _crawdb_open(1, 0, NULL, idx_path, dat_path, nkey, out_craw);
 }
 
-int crawdb_open(char *path_idx, char *path_dat, crawdb_t **out_craw) {
-    return _crawdb_new_or_open(0, 0, NULL, path_idx, path_dat, 0, out_craw);
+int crawdb_open(char *idx_path, char *dat_path, crawdb_t **out_craw) {
+    return _crawdb_open(0, 0, NULL, idx_path, dat_path, 0, out_craw);
 }
 
 int crawdb_reload(crawdb_t *craw) {
     crawdb_t *craw_ignore;
-    return _crawdb_new_or_open(0, 0, craw, craw->path_idx, craw->path_dat, 0, &craw_ignore);
+    return _crawdb_open(0, 0, craw, craw->idx_path, craw->dat_path, 0, &craw_ignore);
 }
 
 static int _crawdb_reload_for_index(crawdb_t *craw) {
     crawdb_t *craw_ignore;
-    return _crawdb_new_or_open(0, 1, craw, craw->path_idx, craw->path_dat, 0, &craw_ignore);
+    return _crawdb_open(0, 1, craw, craw->idx_path, craw->dat_path, 0, &craw_ignore);
 }
 
-static int _crawdb_new_or_open(int is_new, int for_index, crawdb_t *reload, char *path_idx, char *path_dat, uint32_t nkey, crawdb_t **out_craw) {
-    int fd_idx;
-    int fd_dat;
+static int _crawdb_open(int is_new, int for_index, crawdb_t *reload, char *idx_path, char *dat_path, uint32_t nkey, crawdb_t **out_craw) {
+    int rv;
+    int rc;
     crawdb_t *craw;
-    ssize_t iorv;
-    off_t size_idx;
-    uchar header[CRAWDB_HEADER_SIZE];
+    int dat_fd;
+    int idx_fd;
     int flags;
+    off_t idx_size;
+    off_t idx_extra;
+    ssize_t iorv;
+    uchar header[CRAWDB_HEADER_SIZE];
 
-    fd_idx = -1;
-    fd_dat = -1;
     craw = NULL;
+    idx_fd = -1;
+    dat_fd = -1;
 
     /* Set open flags */
     flags = O_RDWR | O_CREAT;
@@ -52,104 +56,107 @@ static int _crawdb_new_or_open(int is_new, int for_index, crawdb_t *reload, char
     }
 
     /* Open idx */
-    fd_idx = open(path_idx, flags, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-    if (fd_idx < 0) {
-        goto _crawdb_new_or_open_err;
-    }
+    idx_fd = open(idx_path, flags, 00644);
+    goto_if_err(idx_fd < 0, CRAWDB_ERR_OPEN_IDX, _crawdb_open_err);
 
     /* Open dat */
-    fd_dat = open(path_dat, flags, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-    if (fd_dat < 0) {
-        goto _crawdb_new_or_open_err;
-    }
+    dat_fd = open(dat_path, flags, 00644);
+    goto_if_err(dat_fd < 0, CRAWDB_ERR_OPEN_DAT, _crawdb_open_err);
 
     if (is_new) {
+        /* Error if nkey lt 1 */
+        goto_if_err(nkey < 1, CRAWDB_ERR_OPEN_NKEY_ZERO, _crawdb_open_err);
+
         /* Write idx header */
         header[0] = 'C';
         header[1] = 'R';
         header[2] = 'A';
         header[3] = 'W';
-        header[4] = 1;                  /* version */
-        memcpy(header + 5, &nkey, 4);   /* keylen*/
+        header[4] = CRAWDB_HEADER_VERS; /* version */
+        memcpy(header + 5, &nkey, 4);   /* keylen */
         memset(header + 9, 0, 8);       /* nsorted */
         header[CRAWDB_OFFSET_DEAD] = 0; /* deadflag */
-        iorv = write(fd_idx, header, CRAWDB_HEADER_SIZE);
-        if (iorv != CRAWDB_HEADER_SIZE) {
-            goto _crawdb_new_or_open_err;
-        }
+        iorv = write(idx_fd, header, CRAWDB_HEADER_SIZE);
+        goto_if_err(iorv != CRAWDB_HEADER_SIZE, CRAWDB_ERR_OPEN_WRITE_HEADER, _crawdb_open_err);
+
     } else {
         /* Read idx header */
-        iorv = read(fd_idx, header, CRAWDB_HEADER_SIZE);
-        if (iorv != CRAWDB_HEADER_SIZE) {
-            goto _crawdb_new_or_open_err;
-        }
+        iorv = read(idx_fd, header, CRAWDB_HEADER_SIZE);
+        goto_if_err(iorv != CRAWDB_HEADER_SIZE, CRAWDB_ERR_OPEN_READ_HEADER, _crawdb_open_err);
 
         /* Check header */
-        if (   header[0] != 'C'
-            || header[1] != 'R'
-            || header[2] != 'A'
-            || header[3] != 'W'
-        ) {
-            goto _crawdb_new_or_open_err;
-        }
+        rc = strncmp((const char*)header, "CRAW", 4);
+        goto_if_err(rc != 0, CRAWDB_ERR_OPEN_BAD_HEADER, _crawdb_open_err);
+
+        /* Check header version */
+        goto_if_err(header[4] != CRAWDB_HEADER_VERS, CRAWDB_ERR_OPEN_BAD_VERS, _crawdb_open_err);
     }
 
-    /* Determine idx size */
-    /* TODO ensure value makes sense */
-    /* TODO DRY */
-    size_idx = lseek(fd_idx, 0, SEEK_END);
-    if (size_idx < 0) {
-        goto _crawdb_new_or_open_err;
-    }
-
+    /* Reuse or allocate new struct */
     if (reload) {
-        /* Reuse struct */
         craw = reload;
-        if (craw->fd_idx >= 0) close(craw->fd_idx);
-        if (craw->fd_dat >= 0) close(craw->fd_dat);
+        if (craw->idx_fd >= 0) close(craw->idx_fd);
+        if (craw->dat_fd >= 0) close(craw->dat_fd);
     } else {
-        /* Allocate struct */
         craw = calloc(1, sizeof(crawdb_t));
-        craw->path_idx  = strdup(path_idx);
-        craw->path_dat  = strdup(path_dat);
+        craw->idx_path  = strdup(idx_path);
+        craw->dat_path  = strdup(dat_path);
     }
-    craw->fd_idx    = fd_idx;
-    craw->fd_dat    = fd_dat;
-    craw->size_idx  = (uint64_t)size_idx;
-    craw->vers      = (uint8_t)header[4];
-    memcpy(&craw->nkey, header + 5, 4); /* TODO portability */
+
+    /* Set fields */
+    craw->idx_fd = idx_fd;
+    craw->dat_fd = dat_fd;
+    craw->vers = (uint8_t)header[4];
+    memcpy(&craw->nkey, header + 5, 4); /* TODO endianness */
     memcpy(&craw->nsorted, header + 9, 8);
-    craw->dead      = (uint8_t)header[17];
-    craw->nrec      = craw->nkey + 8 + 4 + 2; /* key (nkey) + offset (8) + len (4) + cksum (2) */
-    craw->ntotal    = (craw->size_idx - CRAWDB_HEADER_SIZE) / craw->nrec;
-    if (craw->nsorted > craw->ntotal) {
-        craw->nsorted = craw->ntotal; /* TODO error */
-    }
+    craw->dead = (uint8_t)header[CRAWDB_OFFSET_DEAD];
+    craw->nrec = craw->nkey + 8 + 4 + 2; /* key (nkey) + offset (8) + len (4) + cksum (2) */
+
+    /* Validate size of idx */
+    idx_size = lseek(idx_fd, 0, SEEK_END);
+    goto_if_err(idx_size < 0, CRAWDB_ERR_OPEN_LSEEK, _crawdb_open_err);
+    idx_extra = (idx_size - CRAWDB_HEADER_SIZE) % craw->nrec;
+    goto_if_err(idx_extra != 0, CRAWDB_ERR_OPEN_BAD_SIZE, _crawdb_open_err);
+
+    /* Set counts */
+    craw->idx_size = (uint64_t)idx_size;
+    craw->ntotal = (craw->idx_size - CRAWDB_HEADER_SIZE) / craw->nrec;
+    goto_if_err(craw->nsorted > craw->ntotal, CRAWDB_ERR_OPEN_BAD_NSORTED, _crawdb_open_err);
     craw->nunsorted = craw->ntotal - craw->nsorted;
+
     *out_craw = craw;
     return CRAWDB_OK;
 
-_crawdb_new_or_open_err:
-    if (fd_idx >= 0) close(fd_idx);
-    if (fd_dat >= 0) close(fd_dat);
-    return CRAWDB_ERR;
+_crawdb_open_err:
+    if (!reload && craw) {
+        if (craw->idx_path) free(craw->idx_path);
+        if (craw->dat_path) free(craw->dat_path);
+        free(craw);
+    }
+    if (idx_fd >= 0) close(idx_fd);
+    if (dat_fd >= 0) close(dat_fd);
+    return rv;
 }
 
 int crawdb_set(crawdb_t *craw, uchar *key, uint32_t nkey, uchar *val, uint32_t nval) {
-    uint16_t cksum;
-    uint8_t dead;
+    int rv;
     off_t offset;
-    uint64_t offset64;
     ssize_t iorv;
+    uint16_t cksum;
+    uint64_t offset64;
+    uint8_t dead;
+
+    /* Check key len */
+    goto_if_err(nkey > craw->nkey, CRAWDB_ERR_SET_BAD_KEY, crawdb_set_err);
+    goto_if_err(nkey < 1,          CRAWDB_ERR_SET_BAD_KEY, crawdb_set_err);
 
     /* Calc checksum */
     crawdb_cksum(val, nval, &cksum);
 
-    /* Prep rec */
-    if (nkey > craw->nkey) {
-        nkey = craw->nkey; /* TODO error */
+    /* Prep index record */
+    if (!craw->rec) {
+        craw->rec = malloc(craw->nrec);
     }
-    if (!craw->rec) craw->rec = malloc(craw->nrec);
     memset(craw->rec, 0, craw->nrec);
     memcpy(craw->rec,                   key,    nkey);  /* [0    -> n]    key    (n) */
                                                         /* [n    -> n+8]  offset (8) (below) */
@@ -157,98 +164,99 @@ int crawdb_set(crawdb_t *craw, uchar *key, uint32_t nkey, uchar *val, uint32_t n
     memcpy(craw->rec + craw->nkey + 12, &cksum, 2);     /* [n+12 -> n+14] cksum  (2) */
 
     /* Lock */
-    if (_crawdb_lock(craw) != CRAWDB_OK) {
-        return CRAWDB_ERR;
-    }
+    try(_crawdb_lock(craw));
 
     /* Check dead flag */
     dead = 0;
-    if (pread(craw->fd_idx, &dead, 1, CRAWDB_OFFSET_DEAD) != 1 || dead != 0) {
-        goto crawdb_set_err;
-    }
+    iorv = pread(craw->idx_fd, &dead, 1, CRAWDB_OFFSET_DEAD);
+    goto_if_err(iorv != 1, CRAWDB_ERR_SET_PREAD_DEAD, crawdb_set_err);
+    goto_if_err(dead != 0, CRAWDB_ERR_SET_IDX_DEAD, crawdb_set_err);
 
     /* Get dat offset */
-    offset = lseek(craw->fd_dat, 0, SEEK_END);
-    if (offset < 0) {
-        goto crawdb_set_err;
-    }
+    offset = lseek(craw->dat_fd, 0, SEEK_END);
+    goto_if_err(offset < 0, CRAWDB_ERR_SET_LSEEK, crawdb_set_err);
 
-    /* Set offset in rec */
+    /* Set offset in index record */
     offset64 = (uint64_t)offset;
     memcpy(craw->rec + craw->nkey,      &offset64,  8); /* [n    -> n+8]  offset (8) */
 
     /* Write dat */
-    iorv = write(craw->fd_dat, val, (size_t)nval);
-    if (iorv != (ssize_t)nval) {
-        goto crawdb_set_err;
-    }
+    iorv = write(craw->dat_fd, val, (size_t)nval);
+    goto_if_err(iorv != (ssize_t)nval, CRAWDB_ERR_SET_WRITE_DAT, crawdb_set_err);
 
     /* Write idx rec */
-    iorv = write(craw->fd_idx, craw->rec, craw->nrec);
-    if (iorv != (ssize_t)craw->nrec) {
-        goto crawdb_set_err;
-    }
+    iorv = write(craw->idx_fd, craw->rec, craw->nrec);
+    goto_if_err(iorv != (ssize_t)craw->nrec, CRAWDB_ERR_SET_WRITE_IDX, crawdb_set_err);
 
     /* Unlock */
-    _crawdb_unlock(craw);
+    try(_crawdb_unlock(craw));
     return CRAWDB_OK;
 
 crawdb_set_err:
-
-    _crawdb_unlock(craw);
-    return CRAWDB_ERR;
+    _crawdb_unlock_if_locked(craw);
+    return rv;
 }
 
 
-int crawdb_get(crawdb_t *craw, uchar *okey, uint32_t nokey, uchar **out_val, uint32_t *out_nval) {
+int crawdb_get(crawdb_t *craw, uchar *orig_key, uint32_t orig_nkey, uchar **out_val, uint32_t *out_nval) {
     int rv;
+    int rc;
     int found;
     uint64_t offset;
     uint32_t len;
     uint16_t cksum;
     uchar *key;
 
-    found = 0;
-
-    /* Allocate rec */
-    if (!craw->rec) craw->rec = malloc(craw->nrec);
-
-    /* Pad key */
-    if (nokey < craw->nkey) {
-        key = calloc(1, craw->nkey);
-        memcpy(key, okey, nokey);
-    } else if (nokey == craw->nkey) {
-        key = okey;
-    } else {
-        /* TODO error nokey > craw->nkey */
-        key = okey;
+    /* Maybe allocate rec */
+    if (!craw->rec) {
+        craw->rec = malloc(craw->nrec);
     }
+
+    /* Check key len */
+    goto_if_err(orig_nkey > craw->nkey, CRAWDB_ERR_GET_BAD_KEY, crawdb_get_err);
+    goto_if_err(orig_nkey < 1,          CRAWDB_ERR_GET_BAD_KEY, crawdb_get_err);
+
+    /* Maybe pad key */
+    if (orig_nkey < craw->nkey) {
+        key = calloc(1, craw->nkey); /* TODO scratch key buffer */
+        memcpy(key, orig_key, orig_nkey);
+    } else { /* orig_nkey == craw->nkey */
+        key = orig_key;
+    }
+
+    found = 0;
 
     if (craw->nsorted > 0) {
         /* Try binary search */
-        rv = _crawdb_get_bsearch(craw, key, craw->nkey, &found, &offset, &len, &cksum);
-        if (rv != CRAWDB_OK) {
-            return rv;
-        }
+        rc = _crawdb_get_bsearch(craw, key, craw->nkey, &found, &offset, &len, &cksum);
+        goto_if_err(rc != CRAWDB_OK, rc, crawdb_get_err);
     }
 
     if (!found) {
         if (craw->nunsorted > 0) {
             /* Try linear search */
-            rv =_crawdb_get_lsearch(craw, key, craw->nkey, &found, &offset, &len, &cksum);
-            if (rv != CRAWDB_OK) {
-                return rv;
-            }
+            rc =_crawdb_get_lsearch(craw, key, craw->nkey, &found, &offset, &len, &cksum);
+            goto_if_err(rc != CRAWDB_OK, rc, crawdb_get_err);
         }
     }
 
     /* Key not found */
     if (!found) {
-        return CRAWDB_ERR;
+        *out_val = NULL;
+        *out_nval = 0;
+        goto crawdb_get_ok;
     }
 
     /* Fetch data */
-    return _crawdb_get_data(craw, offset, len, cksum, out_val, out_nval);
+    rc = _crawdb_get_data(craw, offset, len, cksum, out_val, out_nval);
+    goto_if_err(rc != CRAWDB_OK, rc, crawdb_get_err);
+
+crawdb_get_ok:
+    if (key != orig_key) free(key); /* TODO scratch key buffer */
+    return CRAWDB_OK;
+
+crawdb_get_err:
+    return rv;
 }
 
 int crawdb_cksum(uchar *val, uint32_t len, uint16_t *out_cksum) {
@@ -294,8 +302,8 @@ static int _crawdb_get_bsearch(crawdb_t *craw, uchar *key, uint32_t nkey, int *o
     while (end >= start) {
         look = (start + end) / 2;
         look_offset = CRAWDB_HEADER_SIZE + (look * craw->nrec);
-        if (pread(craw->fd_idx, craw->rec, craw->nrec, look_offset) != craw->nrec) {
-            return CRAWDB_ERR;
+        if (pread(craw->idx_fd, craw->rec, craw->nrec, look_offset) != craw->nrec) {
+            return CRAWDB_ERR_BSEARCH;
         }
         rv = memcmp(craw->rec, key, nkey);
         if (rv == 0) {
@@ -327,8 +335,8 @@ static int _crawdb_get_lsearch(crawdb_t *craw, uchar *key, uint32_t nkey, int *o
 
     for (look = end; look >= start; look--) {
         look_offset = CRAWDB_HEADER_SIZE + ((craw->nsorted + look) * craw->nrec);
-        if (pread(craw->fd_idx, craw->rec, craw->nrec, look_offset) != craw->nrec) {
-            return CRAWDB_ERR;
+        if (pread(craw->idx_fd, craw->rec, craw->nrec, look_offset) != craw->nrec) {
+            return CRAWDB_ERR_LSEARCH;
         }
         rv = memcmp(craw->rec, key, nkey);
         if (rv == 0) {
@@ -355,15 +363,15 @@ static int _crawdb_get_data(crawdb_t *craw, uint64_t offset, uint32_t len, uint1
     }
 
     /* Read from dat file */
-    if (pread(craw->fd_dat, craw->data, len, offset) != len) {
-        return CRAWDB_ERR;
+    if (pread(craw->dat_fd, craw->data, len, offset) != len) {
+        return CRAWDB_ERR_GET_DATA_READ;
     }
 
     /* Calc and compare checksum */
     dat_cksum = 0;
     crawdb_cksum(craw->data, len, &dat_cksum);
     if (dat_cksum != cksum) {
-        return CRAWDB_ERR;
+        return CRAWDB_ERR_GET_DATA_CKSUM;
     }
 
     *out_val = craw->data;
@@ -376,7 +384,7 @@ int crawdb_index(crawdb_t *craw) {
     char *path_new;
     int fd_copy;
     int fd_new;
-    int fd_idx;
+    int idx_fd;
     long size_new;
     int rv;
 
@@ -385,13 +393,13 @@ int crawdb_index(crawdb_t *craw) {
     fd_copy = -1;
     fd_new = -1;
 
-    /* Reopen fd_idx without O_APPEND */
-    fd_idx = open(craw->path_idx, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-    if (fd_idx < 0) {
+    /* Reopen idx_fd without O_APPEND */
+    idx_fd = open(craw->idx_path, O_RDWR | O_CREAT, 00644);
+    if (idx_fd < 0) {
         goto crawdb_index_err;
     }
-    close(craw->fd_idx);
-    craw->fd_idx = fd_idx;
+    close(craw->idx_fd);
+    craw->idx_fd = idx_fd;
 
     /* Copy index */
     if (_crawdb_index_copy(craw, &fd_copy, &path_copy) != CRAWDB_OK) {
@@ -409,14 +417,14 @@ int crawdb_index(crawdb_t *craw) {
         goto crawdb_index_err;
     }
 
-    /* Reopen fd_idx with O_APPEND */
-    fd_idx = open(craw->path_idx, O_RDWR | O_CREAT | O_APPEND, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-    if (fd_idx < 0) {
+    /* Reopen idx_fd with O_APPEND */
+    idx_fd = open(craw->idx_path, O_RDWR | O_CREAT | O_APPEND, 00644);
+    if (idx_fd < 0) {
         goto crawdb_index_err;
     }
-    close(craw->fd_idx);
-    craw->fd_idx = fd_idx;
-    fd_idx = -1;
+    close(craw->idx_fd);
+    craw->idx_fd = idx_fd;
+    idx_fd = -1;
 
     rv = CRAWDB_OK;
     goto crawdb_index_ok;
@@ -427,11 +435,12 @@ crawdb_index_err:
 crawdb_index_ok:
     if (path_copy) free(path_copy);
     if (path_new) free(path_new);
-    if (fd_idx >= 0) close(fd_idx);
+    if (idx_fd >= 0) close(idx_fd);
     return rv;
 }
 
 static int _crawdb_index_copy(crawdb_t *craw, int *out_fd_copy, char **out_path_copy) {
+    int rv;
     char *path_copy;
     size_t path_copy_len;
     int fd_copy;
@@ -441,33 +450,29 @@ static int _crawdb_index_copy(crawdb_t *craw, int *out_fd_copy, char **out_path_
     fd_copy = -1;
 
     /* Lock */
-    if (_crawdb_lock(craw) != CRAWDB_OK) {
-        return CRAWDB_ERR;
-    }
+    try(_crawdb_lock(craw));
 
     /* Reload */
-    if (_crawdb_reload_for_index(craw) != CRAWDB_OK) {
-        return CRAWDB_ERR;
-    }
+    try(_crawdb_reload_for_index(craw));
 
     /* Open copy file */
-    path_copy_len = strlen(craw->path_idx) + 5; /* ".copy" (5) */
+    path_copy_len = strlen(craw->idx_path) + 5; /* ".copy" (5) */
     path_copy = malloc(path_copy_len + 1);
-    snprintf(path_copy, path_copy_len + 1, "%s.copy", craw->path_idx);
-    fd_copy = open(path_copy, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+    snprintf(path_copy, path_copy_len + 1, "%s.copy", craw->idx_path);
+    fd_copy = open(path_copy, O_RDWR | O_CREAT | O_TRUNC, 00644);
     if (fd_copy < 0) {
         goto _crawdb_index_copy_err;
     }
 
     /* Copy index */
-    if (lseek(craw->fd_idx, 0, SEEK_SET) < 0) {
+    if (lseek(craw->idx_fd, 0, SEEK_SET) < 0) {
         goto _crawdb_index_copy_err;
     }
     if (lseek(fd_copy, 0, SEEK_SET) < 0) {
         goto _crawdb_index_copy_err;
     }
-    iorv = copy_file_range(craw->fd_idx, NULL, fd_copy, NULL, (size_t)craw->size_idx, 0);
-    if (iorv != (ssize_t)craw->size_idx) {
+    iorv = copy_file_range(craw->idx_fd, NULL, fd_copy, NULL, (size_t)craw->idx_size, 0);
+    if (iorv != (ssize_t)craw->idx_size) {
         goto _crawdb_index_copy_err;
     }
 
@@ -503,21 +508,21 @@ static int _crawdb_index_sort(crawdb_t *craw, char *path_copy, int *inout_fd_cop
     fd_new = -1;
 
     /* Open file */
-    path_new_len = strlen(craw->path_idx) + 4; /* ".new" (4) */
+    path_new_len = strlen(craw->idx_path) + 4; /* ".new" (4) */
     path_new = malloc(path_new_len + 1);
-    snprintf(path_new, path_new_len + 1, "%s.new", craw->path_idx);
-    fd_new = open(path_new, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+    snprintf(path_new, path_new_len + 1, "%s.new", craw->idx_path);
+    fd_new = open(path_new, O_RDWR | O_CREAT | O_TRUNC, 00644);
     if (fd_new < 0) {
         goto _crawdb_index_sort_err;
     }
 
     /* Read copy into memory for sorting */
-    buf = malloc(craw->size_idx);
+    buf = malloc(craw->idx_size);
     if (lseek(*inout_fd_copy, CRAWDB_HEADER_SIZE, SEEK_SET) < 0) {
         goto _crawdb_index_sort_err;
     }
-    iorv = read(*inout_fd_copy, buf, craw->size_idx - CRAWDB_HEADER_SIZE);
-    if (iorv != craw->size_idx - CRAWDB_HEADER_SIZE) {
+    iorv = read(*inout_fd_copy, buf, craw->idx_size - CRAWDB_HEADER_SIZE);
+    if (iorv != craw->idx_size - CRAWDB_HEADER_SIZE) {
         goto _crawdb_index_sort_err;
     }
 
@@ -571,51 +576,52 @@ _crawdb_index_sort_err:
 }
 
 static int _crawdb_index_swap(crawdb_t *craw, char *path_new, int fd_new, long size_new) {
+    int rv;
+    ssize_t iorv;
     loff_t offset_dst;
     loff_t offset_src;
-    long size_idx_after;
+    long idx_size_after;
     size_t copy_len;
     uint8_t dead;
 
     /* Lock */
-    if (_crawdb_lock(craw) != CRAWDB_OK) {
-        return CRAWDB_ERR;
-    }
+    try(_crawdb_lock(craw));
 
     /* Determine idx size again */
     /* TODO ensure value makes sense */
-    size_idx_after = lseek(craw->fd_idx, 0, SEEK_END);
-    if (size_idx_after < 0) {
-        return CRAWDB_ERR;
+    idx_size_after = lseek(craw->idx_fd, 0, SEEK_END);
+    if (idx_size_after < 0) {
+        return CRAWDB_ERR_SWAP_LSEEK;
     }
 
     /* Copy records that came in while we were indexing */
-    if (size_idx_after > craw->size_idx) {
-        copy_len = (size_t)(size_idx_after - craw->size_idx);
-        offset_src = (loff_t)craw->size_idx;
+    if (idx_size_after > craw->idx_size) {
+        copy_len = (size_t)(idx_size_after - craw->idx_size);
+        offset_src = (loff_t)craw->idx_size;
         offset_dst = (loff_t)size_new;
-        if (copy_file_range(craw->fd_idx, &offset_src, fd_new, &offset_dst, copy_len, 0) != (ssize_t)copy_len) {
-            return CRAWDB_ERR;
+        iorv = copy_file_range(craw->idx_fd, &offset_src, fd_new, &offset_dst, copy_len, 0);
+        if (iorv != (ssize_t)copy_len) {
+            return CRAWDB_ERR_SWAP_COPY;
         }
     }
 
     /* Rename idx to new */
-    if (rename(path_new, craw->path_idx) != 0) {
-        return CRAWDB_ERR;
+    if (rename(path_new, craw->idx_path) != 0) {
+        return CRAWDB_ERR_SWAP_RENAME;
     }
 
     /* Write dead byte on old idx */
     dead = 1;
-    if (pwrite(craw->fd_idx, &dead, 1, CRAWDB_OFFSET_DEAD) != 1) {
-        return CRAWDB_ERR;
+    if (pwrite(craw->idx_fd, &dead, 1, CRAWDB_OFFSET_DEAD) != 1) {
+        return CRAWDB_ERR_SWAP_WRITE_DEAD;
     }
 
     /* Reload for O_APPEND */
-    if (crawdb_reload(craw) != CRAWDB_OK) {
-        return CRAWDB_ERR;
-    }
+    try(crawdb_reload(craw));
 
-    _crawdb_unlock(craw);
+    /* Unlock */
+    try(_crawdb_unlock(craw));
+
     return CRAWDB_OK;
 }
 
@@ -645,26 +651,35 @@ int crawdb_get_keylen(crawdb_t *craw, uint32_t *out_nkey) {
 }
 
 int crawdb_free(crawdb_t *craw) {
-    if (craw->fd_idx >= 0) close(craw->fd_idx);
-    if (craw->fd_dat >= 0) close(craw->fd_dat);
+    if (craw->idx_fd >= 0) close(craw->idx_fd);
+    if (craw->dat_fd >= 0) close(craw->dat_fd);
     if (craw->rec) free(craw->rec);
     if (craw->data) free(craw->data);
-    free(craw->path_idx);
-    free(craw->path_dat);
+    free(craw->idx_path);
+    free(craw->dat_path);
     free(craw);
     return CRAWDB_OK;
 }
 
 static int _crawdb_lock(crawdb_t *craw) {
-    if (flock(craw->fd_idx, LOCK_EX) != 0) {
-        return CRAWDB_ERR;
+    if (flock(craw->idx_fd, LOCK_EX) != 0) {
+        return CRAWDB_ERR_LOCK_EX;
     }
+    craw->locked = 1;
     return CRAWDB_OK;
 }
 
 static int _crawdb_unlock(crawdb_t *craw) {
-    if (flock(craw->fd_idx, LOCK_UN) != 0) {
-        return CRAWDB_ERR;
+    if (flock(craw->idx_fd, LOCK_UN) != 0) {
+        return CRAWDB_ERR_LOCK_UN;
+    }
+    craw->locked = 0;
+    return CRAWDB_OK;
+}
+
+static int _crawdb_unlock_if_locked(crawdb_t *craw) {
+    if (craw->locked) {
+        return _crawdb_unlock(craw);
     }
     return CRAWDB_OK;
 }
