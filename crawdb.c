@@ -1,93 +1,40 @@
-#define _GNU_SOURCE
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <getopt.h>
-#include <stdint.h>
-#include <sys/file.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <time.h>
+#include "crawdb.h"
 
-/*
-idx:
-   0 - 4      4: CRAW
-   4 - 5      1: vers
-   5 - 9      4: nkey
-   9 - 17     8: nsorted
-  17 - 18     1: dead
-[
-   0 - n      n: key
-   n - n+8    8: offset
- n+8 - n+12   4: len
-n+12 - n+14   2: cksum
-]*
-
-dat:
-<data>
-*/
-
-typedef struct crawdb_s crawdb_t;
-typedef unsigned char uchar;
-
-struct crawdb_s {
-    char *path_idx;
-    int fd_idx;
-    int fd_dat;
-    long size_idx;
-    long size_dat;
-    uint8_t vers;
-    uint32_t nkey;
-    uint64_t nsorted;
-    uint64_t nunsorted;
-    uint64_t ntotal;
-    uint8_t dead;
-    uchar *rec;
-    size_t nrec;
-    uchar *data;
-    size_t ndata;
-};
-
-#define CRAWDB_OK             0
-#define CRAWDB_ERR           -1
-#define CRAWDB_HEADER_SIZE    18
-#define CRAWDB_OFFSET_NSORTED 9
-#define CRAWDB_OFFSET_DEAD    17
-
-int crawdb_new(char *path_idx, char *path_dat, uint32_t nkey, crawdb_t **out_craw);
-int crawdb_open(char *path_idx, char *path_dat, crawdb_t **out_craw);
-int _crawdb_new_or_open(int is_new, char *path_idx, char *path_dat, uint32_t nkey, crawdb_t **out_craw);
-int crawdb_set(crawdb_t *craw, uchar *key, uint32_t nkey, uchar *val, uint32_t nval);
-int crawdb_cksum(uchar *val, uint32_t len, uint16_t *out_cksum);
-int crawdb_get(crawdb_t *craw, uchar *key, uint32_t nkey, uchar **out_val, uint32_t *out_nval);
-int _crawdb_get_bsearch(crawdb_t *craw, uchar *key, uint32_t nkey, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum);
-int _crawdb_get_lsearch(crawdb_t *craw, uchar *key, uint32_t nkey, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum);
-int _crawdb_get_data(crawdb_t *craw, uint64_t offset, uint32_t len, uint16_t cksum, uchar **out_val, uint32_t *out_nval);
-int crawdb_index(crawdb_t *craw);
-int _crawdb_index_copy(crawdb_t *craw, long *out_size_idx, int *out_fd_copy, char **out_path_copy);
-int _crawdb_index_sort(crawdb_t *craw, char *path_copy, long size_copy, int *inout_fd_copy, char **out_path_new, int *out_fd_new, long *out_size_new);
-int _crawdb_index_swap(crawdb_t *craw, char *path_new, int fd_new, long size_idx, long size_new);
-int crawdb_free(crawdb_t *craw);
-int _crawdb_lock(crawdb_t *craw);
-int _crawdb_unlock(crawdb_t *craw);
+static int _crawdb_reload_for_index(crawdb_t *craw);
+static int _crawdb_new_or_open(int is_new, int for_index, crawdb_t *reload, char *path_idx, char *path_dat, uint32_t nkey, crawdb_t **out_craw);
+static int _crawdb_get_bsearch(crawdb_t *craw, uchar *key, uint32_t nkey, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum);
+static int _crawdb_get_lsearch(crawdb_t *craw, uchar *key, uint32_t nkey, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum);
+static int _crawdb_get_data(crawdb_t *craw, uint64_t offset, uint32_t len, uint16_t cksum, uchar **out_val, uint32_t *out_nval);
+static int _crawdb_index_copy(crawdb_t *craw, int *out_fd_copy, char **out_path_copy);
+static int _crawdb_index_sort(crawdb_t *craw, char *path_copy, int *inout_fd_copy, char **out_path_new, int *out_fd_new, long *out_size_new);
+static int _crawdb_index_swap(crawdb_t *craw, char *path_new, int fd_new, long size_new);
+static int _crawdb_lock(crawdb_t *craw);
+static int _crawdb_unlock(crawdb_t *craw);
 
 int crawdb_new(char *path_idx, char *path_dat, uint32_t nkey, crawdb_t **out_craw) {
-    return _crawdb_new_or_open(1, path_idx, path_dat, nkey, out_craw);
+    return _crawdb_new_or_open(1, 0, NULL, path_idx, path_dat, nkey, out_craw);
 }
 
 int crawdb_open(char *path_idx, char *path_dat, crawdb_t **out_craw) {
-    return _crawdb_new_or_open(0, path_idx, path_dat, 0, out_craw);
+    return _crawdb_new_or_open(0, 0, NULL, path_idx, path_dat, 0, out_craw);
 }
 
-int _crawdb_new_or_open(int is_new, char *path_idx, char *path_dat, uint32_t nkey, crawdb_t **out_craw) {
+int crawdb_reload(crawdb_t *craw) {
+    crawdb_t *craw_ignore;
+    return _crawdb_new_or_open(0, 0, craw, craw->path_idx, craw->path_dat, 0, &craw_ignore);
+}
+
+static int _crawdb_reload_for_index(crawdb_t *craw) {
+    crawdb_t *craw_ignore;
+    return _crawdb_new_or_open(0, 1, craw, craw->path_idx, craw->path_dat, 0, &craw_ignore);
+}
+
+static int _crawdb_new_or_open(int is_new, int for_index, crawdb_t *reload, char *path_idx, char *path_dat, uint32_t nkey, crawdb_t **out_craw) {
     int fd_idx;
     int fd_dat;
     crawdb_t *craw;
     ssize_t iorv;
     off_t size_idx;
-    off_t size_dat;
     uchar header[CRAWDB_HEADER_SIZE];
     int flags;
 
@@ -96,9 +43,12 @@ int _crawdb_new_or_open(int is_new, char *path_idx, char *path_dat, uint32_t nke
     craw = NULL;
 
     /* Set open flags */
-    flags = O_RDWR | O_CREAT | O_APPEND;
+    flags = O_RDWR | O_CREAT;
     if (is_new) {
         flags |= O_TRUNC;
+    }
+    if (!for_index) {
+        flags |= O_APPEND;
     }
 
     /* Open idx */
@@ -146,24 +96,26 @@ int _crawdb_new_or_open(int is_new, char *path_idx, char *path_dat, uint32_t nke
 
     /* Determine idx size */
     /* TODO ensure value makes sense */
+    /* TODO DRY */
     size_idx = lseek(fd_idx, 0, SEEK_END);
     if (size_idx < 0) {
         goto _crawdb_new_or_open_err;
     }
 
-    /* Determine dat size */
-    size_dat = lseek(fd_dat, 0, SEEK_END);
-    if (size_dat < 0) {
-        goto _crawdb_new_or_open_err;
+    if (reload) {
+        /* Reuse struct */
+        craw = reload;
+        if (craw->fd_idx >= 0) close(craw->fd_idx);
+        if (craw->fd_dat >= 0) close(craw->fd_dat);
+    } else {
+        /* Allocate struct */
+        craw = calloc(1, sizeof(crawdb_t));
+        craw->path_idx  = strdup(path_idx);
+        craw->path_dat  = strdup(path_dat);
     }
-
-    /* Allocate struct */
-    craw = calloc(1, sizeof(crawdb_t));
-    craw->path_idx  = strdup(path_idx);
     craw->fd_idx    = fd_idx;
     craw->fd_dat    = fd_dat;
     craw->size_idx  = (uint64_t)size_idx;
-    craw->size_dat  = (uint64_t)size_dat;
     craw->vers      = (uint8_t)header[4];
     memcpy(&craw->nkey, header + 5, 4); /* TODO portability */
     memcpy(&craw->nsorted, header + 9, 8);
@@ -329,7 +281,7 @@ int crawdb_cksum(uchar *val, uint32_t len, uint16_t *out_cksum) {
     return CRAWDB_OK;
 }
 
-int _crawdb_get_bsearch(crawdb_t *craw, uchar *key, uint32_t nkey, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum) {
+static int _crawdb_get_bsearch(crawdb_t *craw, uchar *key, uint32_t nkey, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum) {
     uint64_t start;
     uint64_t end;
     uint64_t look;
@@ -363,7 +315,7 @@ int _crawdb_get_bsearch(crawdb_t *craw, uchar *key, uint32_t nkey, int *out_foun
     return CRAWDB_OK;
 }
 
-int _crawdb_get_lsearch(crawdb_t *craw, uchar *key, uint32_t nkey, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum) {
+static int _crawdb_get_lsearch(crawdb_t *craw, uchar *key, uint32_t nkey, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum) {
     uint64_t start;
     uint64_t end;
     uint64_t look;
@@ -392,7 +344,7 @@ int _crawdb_get_lsearch(crawdb_t *craw, uchar *key, uint32_t nkey, int *out_foun
     return CRAWDB_OK;
 }
 
-int _crawdb_get_data(crawdb_t *craw, uint64_t offset, uint32_t len, uint16_t cksum, uchar **out_val, uint32_t *out_nval) {
+static int _crawdb_get_data(crawdb_t *craw, uint64_t offset, uint32_t len, uint16_t cksum, uchar **out_val, uint32_t *out_nval) {
     uint16_t dat_cksum;
 
     /* Allocate data buf */
@@ -425,7 +377,6 @@ int crawdb_index(crawdb_t *craw) {
     int fd_copy;
     int fd_new;
     int fd_idx;
-    long size_idx;
     long size_new;
     int rv;
 
@@ -443,18 +394,18 @@ int crawdb_index(crawdb_t *craw) {
     craw->fd_idx = fd_idx;
 
     /* Copy index */
-    if (_crawdb_index_copy(craw, &size_idx, &fd_copy, &path_copy) != CRAWDB_OK) {
+    if (_crawdb_index_copy(craw, &fd_copy, &path_copy) != CRAWDB_OK) {
         goto crawdb_index_err;
     }
 
     /* Sort copy of index into new index */
     fd_new = -1;
-    if (_crawdb_index_sort(craw, path_copy, size_idx, &fd_copy, &path_new, &fd_new, &size_new) != CRAWDB_OK) {
+    if (_crawdb_index_sort(craw, path_copy, &fd_copy, &path_new, &fd_new, &size_new) != CRAWDB_OK) {
         goto crawdb_index_err;
     }
 
     /* Swap in new index */
-    if (_crawdb_index_swap(craw, path_new, fd_new, size_idx, size_new) != CRAWDB_OK) {
+    if (_crawdb_index_swap(craw, path_new, fd_new, size_new) != CRAWDB_OK) {
         goto crawdb_index_err;
     }
 
@@ -480,11 +431,10 @@ crawdb_index_ok:
     return rv;
 }
 
-int _crawdb_index_copy(crawdb_t *craw, long *out_size_idx, int *out_fd_copy, char **out_path_copy) {
+static int _crawdb_index_copy(crawdb_t *craw, int *out_fd_copy, char **out_path_copy) {
     char *path_copy;
     size_t path_copy_len;
     int fd_copy;
-    long size_idx;
     ssize_t iorv;
 
     path_copy = NULL;
@@ -495,14 +445,12 @@ int _crawdb_index_copy(crawdb_t *craw, long *out_size_idx, int *out_fd_copy, cha
         return CRAWDB_ERR;
     }
 
-    /* Determine idx size */
-    /* TODO ensure value makes sense */
-    size_idx = lseek(craw->fd_idx, 0, SEEK_END);
-    if (size_idx < 0) {
-        goto _crawdb_index_copy_err;
+    /* Reload */
+    if (_crawdb_reload_for_index(craw) != CRAWDB_OK) {
+        return CRAWDB_ERR;
     }
 
-    /* Open file */
+    /* Open copy file */
     path_copy_len = strlen(craw->path_idx) + 5; /* ".copy" (5) */
     path_copy = malloc(path_copy_len + 1);
     snprintf(path_copy, path_copy_len + 1, "%s.copy", craw->path_idx);
@@ -524,7 +472,6 @@ int _crawdb_index_copy(crawdb_t *craw, long *out_size_idx, int *out_fd_copy, cha
     }
 
     *out_fd_copy = fd_copy;
-    *out_size_idx = size_idx;
     *out_path_copy = path_copy;
     _crawdb_unlock(craw);
     return CRAWDB_OK;
@@ -536,13 +483,13 @@ _crawdb_index_copy_err:
     return CRAWDB_ERR;
 }
 
-int _crawdb_index_sort_cmp(const void *a, const void *b, void *arg) {
+static int _crawdb_index_sort_cmp(const void *a, const void *b, void *arg) {
     crawdb_t *craw;
     craw = arg;
     return memcmp(a, b, craw->nkey);
 }
 
-int _crawdb_index_sort(crawdb_t *craw, char *path_copy, long size_copy, int *inout_fd_copy, char **out_path_new, int *out_fd_new, long *out_size_new) {
+static int _crawdb_index_sort(crawdb_t *craw, char *path_copy, int *inout_fd_copy, char **out_path_new, int *out_fd_new, long *out_size_new) {
     char *path_new;
     int fd_new;
     long size_new;
@@ -565,12 +512,12 @@ int _crawdb_index_sort(crawdb_t *craw, char *path_copy, long size_copy, int *ino
     }
 
     /* Read copy into memory for sorting */
-    buf = malloc(size_copy);
+    buf = malloc(craw->size_idx);
     if (lseek(*inout_fd_copy, CRAWDB_HEADER_SIZE, SEEK_SET) < 0) {
         goto _crawdb_index_sort_err;
     }
-    iorv = read(*inout_fd_copy, buf, size_copy - CRAWDB_HEADER_SIZE);
-    if (iorv != size_copy - CRAWDB_HEADER_SIZE) {
+    iorv = read(*inout_fd_copy, buf, craw->size_idx - CRAWDB_HEADER_SIZE);
+    if (iorv != craw->size_idx - CRAWDB_HEADER_SIZE) {
         goto _crawdb_index_sort_err;
     }
 
@@ -623,10 +570,10 @@ _crawdb_index_sort_err:
     return CRAWDB_ERR;
 }
 
-int _crawdb_index_swap(crawdb_t *craw, char *path_new, int fd_new, long size_idx, long size_new) {
+static int _crawdb_index_swap(crawdb_t *craw, char *path_new, int fd_new, long size_new) {
     loff_t offset_dst;
     loff_t offset_src;
-    long size_idx_again;
+    long size_idx_after;
     size_t copy_len;
     uint8_t dead;
 
@@ -637,15 +584,15 @@ int _crawdb_index_swap(crawdb_t *craw, char *path_new, int fd_new, long size_idx
 
     /* Determine idx size again */
     /* TODO ensure value makes sense */
-    size_idx_again = lseek(craw->fd_idx, 0, SEEK_END);
-    if (size_idx_again < 0) {
+    size_idx_after = lseek(craw->fd_idx, 0, SEEK_END);
+    if (size_idx_after < 0) {
         return CRAWDB_ERR;
     }
 
     /* Copy records that came in while we were indexing */
-    if (size_idx_again > size_idx) {
-        copy_len = (size_t)(size_idx_again - size_idx);
-        offset_src = (loff_t)size_idx;
+    if (size_idx_after > craw->size_idx) {
+        copy_len = (size_t)(size_idx_after - craw->size_idx);
+        offset_src = (loff_t)craw->size_idx;
         offset_dst = (loff_t)size_new;
         if (copy_file_range(craw->fd_idx, &offset_src, fd_new, &offset_dst, copy_len, 0) != (ssize_t)copy_len) {
             return CRAWDB_ERR;
@@ -658,9 +605,13 @@ int _crawdb_index_swap(crawdb_t *craw, char *path_new, int fd_new, long size_idx
     }
 
     /* Write dead byte on old idx */
-    /* TODO Have to open without O_APPEND for this to work */
     dead = 1;
     if (pwrite(craw->fd_idx, &dead, 1, CRAWDB_OFFSET_DEAD) != 1) {
+        return CRAWDB_ERR;
+    }
+
+    /* Reload for O_APPEND */
+    if (crawdb_reload(craw) != CRAWDB_OK) {
         return CRAWDB_ERR;
     }
 
@@ -668,28 +619,57 @@ int _crawdb_index_swap(crawdb_t *craw, char *path_new, int fd_new, long size_idx
     return CRAWDB_OK;
 }
 
+int crawdb_get_nkey(crawdb_t *craw, uint32_t *out_nkey) {
+    *out_nkey = craw->nkey;
+    return CRAWDB_OK;
+}
+
+int crawdb_get_ntotal(crawdb_t *craw, uint64_t *out_ntotal) {
+    *out_ntotal = craw->ntotal;
+    return CRAWDB_OK;
+}
+
+int crawdb_get_nsorted(crawdb_t *craw, uint64_t *out_nsorted) {
+    *out_nsorted = craw->nsorted;
+    return CRAWDB_OK;
+}
+
+int crawdb_get_nunsorted(crawdb_t *craw, uint64_t *out_nunsorted) {
+    *out_nunsorted = craw->nunsorted;
+    return CRAWDB_OK;
+}
+
+int crawdb_get_keylen(crawdb_t *craw, uint32_t *out_nkey) {
+    *out_nkey = craw->nkey;
+    return CRAWDB_OK;
+}
+
 int crawdb_free(crawdb_t *craw) {
     if (craw->fd_idx >= 0) close(craw->fd_idx);
     if (craw->fd_dat >= 0) close(craw->fd_dat);
     if (craw->rec) free(craw->rec);
+    if (craw->data) free(craw->data);
     free(craw->path_idx);
+    free(craw->path_dat);
     free(craw);
     return CRAWDB_OK;
 }
 
-int _crawdb_lock(crawdb_t *craw) {
+static int _crawdb_lock(crawdb_t *craw) {
     if (flock(craw->fd_idx, LOCK_EX) != 0) {
         return CRAWDB_ERR;
     }
     return CRAWDB_OK;
 }
 
-int _crawdb_unlock(crawdb_t *craw) {
+static int _crawdb_unlock(crawdb_t *craw) {
     if (flock(craw->fd_idx, LOCK_UN) != 0) {
         return CRAWDB_ERR;
     }
     return CRAWDB_OK;
 }
+
+#ifdef CRAWDB_MAIN
 
 void usage(FILE *fp, int exit_code) {
     fprintf(fp, "Usage:\n");
@@ -822,3 +802,5 @@ main_err:
 
     return rv;
 }
+
+#endif /* CRAWDB_MAIN */
