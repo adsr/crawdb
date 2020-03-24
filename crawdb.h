@@ -75,24 +75,9 @@ start - end  bytes: content
 #define CRAWDB_OFFSET_DEAD             17
 #define CRAWDB_API                     __attribute__ ((visibility ("default")))
 
-#define try(__call) do {                            \
-    if ((rv = (__call)) != CRAWDB_OK) {             \
-        return rv;                                  \
-    }                                               \
-} while(0)
-
-#define goto_if_err(__cond, __errv, __labl) do {    \
-    if (__cond) {                                   \
-        rv = (__errv);                              \
-        goto __labl;                                \
-    }                                               \
-} while(0);
-
-#define return_if_err(__cond, __errv) do {          \
-    if (__cond) {                                   \
-        return (__errv);                            \
-    }                                               \
-} while(0);
+#define try(__call)                         do { if ((rv = (__call)) != CRAWDB_OK) return rv;   } } while(0)
+#define goto_if_err(__cond, __errv, __labl) do { if (__cond) { rv = (__errv); goto __labl;      } } while(0);
+#define return_if_err(__cond, __errv)       do { if (__cond) { return (__errv);                 } } while(0);
 
 typedef struct crawdb_s crawdb_t;
 typedef unsigned char uchar;
