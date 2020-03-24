@@ -7,13 +7,14 @@ alternative to sqlite for write-once read-only workloads.
 Similar to Arizona, a crawdb has two files, an index file and a data file. The
 index file has the following format:
 
-	"CRAW":4
-	<vers:1>
-	<nkey:4>
-	<nsorted:8>
-	<dead:1>
-    <key:nkey> <offset:8> <len:4> <cksum:2>
-    ...
+      HEADER    "CRAW":4
+                <vers:1>
+                <nkey:4>
+                <nsorted:8>
+                <dead:1>
+      SORTED    <key:nkey> <offset:8> <len:4> <cksum:2>
+                ...
+    UNSORTED    ...
 
 Sorted entries appear first, followed by unsorted entries.
 
