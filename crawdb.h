@@ -28,42 +28,50 @@ start - end  bytes: content
                  ]*
 */
 
-#define CRAWDB_OK                     0
+#define CRAWDB_OK                      0
+#define CRAWDB_ERR                    -1
+#define CRAWDB_ERR_BSEARCH            -2
+#define CRAWDB_ERR_GET_BAD_KEY        -3
+#define CRAWDB_ERR_GET_DATA_CKSUM     -4
+#define CRAWDB_ERR_GET_DATA_READ      -5
+#define CRAWDB_ERR_INDEX_COPY         -6
+#define CRAWDB_ERR_INDEX_LSEEK        -7
+#define CRAWDB_ERR_INDEX_OPEN_COPY    -8
+#define CRAWDB_ERR_LOCK_EX            -9
+#define CRAWDB_ERR_LOCK_UN            -10
+#define CRAWDB_ERR_LSEARCH            -11
+#define CRAWDB_ERR_OPEN_BAD_HEADER    -12
+#define CRAWDB_ERR_OPEN_BAD_NSORTED   -13
+#define CRAWDB_ERR_OPEN_BAD_SIZE      -14
+#define CRAWDB_ERR_OPEN_BAD_VERS      -15
+#define CRAWDB_ERR_OPEN_DAT           -16
+#define CRAWDB_ERR_OPEN_IDX           -17
+#define CRAWDB_ERR_OPEN_LSEEK         -18
+#define CRAWDB_ERR_OPEN_NKEY_ZERO     -19
+#define CRAWDB_ERR_OPEN_READ_HEADER   -20
+#define CRAWDB_ERR_OPEN_WRITE_HEADER  -21
+#define CRAWDB_ERR_SET_BAD_KEY        -22
+#define CRAWDB_ERR_SET_IDX_DEAD       -23
+#define CRAWDB_ERR_SET_LSEEK          -24
+#define CRAWDB_ERR_SET_PREAD_DEAD     -25
+#define CRAWDB_ERR_SET_WRITE_DAT      -26
+#define CRAWDB_ERR_SET_WRITE_IDX      -27
+#define CRAWDB_ERR_SORT_COPY_HEADER   -28
+#define CRAWDB_ERR_SORT_LSEEK         -29
+#define CRAWDB_ERR_SORT_OPEN_NEW      -30
+#define CRAWDB_ERR_SORT_READ          -31
+#define CRAWDB_ERR_SORT_WRITE_NSORTED -32
+#define CRAWDB_ERR_SORT_WRITE_REC     -33
+#define CRAWDB_ERR_SWAP_COPY          -34
+#define CRAWDB_ERR_SWAP_LSEEK         -35
+#define CRAWDB_ERR_SWAP_RENAME        -36
+#define CRAWDB_ERR_SWAP_WRITE_DEAD    -37
 
-#define CRAWDB_ERR                   -1
-#define CRAWDB_ERR_BSEARCH           -2
-#define CRAWDB_ERR_GET_BAD_KEY       -3
-#define CRAWDB_ERR_GET_DATA_CKSUM    -4
-#define CRAWDB_ERR_GET_DATA_READ     -5
-#define CRAWDB_ERR_LOCK_EX           -6
-#define CRAWDB_ERR_LOCK_UN           -7
-#define CRAWDB_ERR_LSEARCH           -8
-#define CRAWDB_ERR_OPEN_BAD_HEADER   -9
-#define CRAWDB_ERR_OPEN_BAD_NSORTED  -10
-#define CRAWDB_ERR_OPEN_BAD_SIZE     -11
-#define CRAWDB_ERR_OPEN_BAD_VERS     -12
-#define CRAWDB_ERR_OPEN_DAT          -13
-#define CRAWDB_ERR_OPEN_IDX          -14
-#define CRAWDB_ERR_OPEN_LSEEK        -15
-#define CRAWDB_ERR_OPEN_NKEY_ZERO    -16
-#define CRAWDB_ERR_OPEN_READ_HEADER  -17
-#define CRAWDB_ERR_OPEN_WRITE_HEADER -18
-#define CRAWDB_ERR_SET_BAD_KEY       -19
-#define CRAWDB_ERR_SET_IDX_DEAD      -20
-#define CRAWDB_ERR_SET_LSEEK         -21
-#define CRAWDB_ERR_SET_PREAD_DEAD    -22
-#define CRAWDB_ERR_SET_WRITE_DAT     -23
-#define CRAWDB_ERR_SET_WRITE_IDX     -24
-#define CRAWDB_ERR_SWAP_COPY         -25
-#define CRAWDB_ERR_SWAP_LSEEK        -26
-#define CRAWDB_ERR_SWAP_RENAME       -27
-#define CRAWDB_ERR_SWAP_WRITE_DEAD   -28
-
-#define CRAWDB_HEADER_SIZE            18
-#define CRAWDB_HEADER_VERS            1
-#define CRAWDB_OFFSET_NSORTED         9
-#define CRAWDB_OFFSET_DEAD            17
-#define CRAWDB_API                    __attribute__ ((visibility ("default")))
+#define CRAWDB_HEADER_SIZE             18
+#define CRAWDB_HEADER_VERS             1
+#define CRAWDB_OFFSET_NSORTED          9
+#define CRAWDB_OFFSET_DEAD             17
+#define CRAWDB_API                     __attribute__ ((visibility ("default")))
 
 #define try(__call) do {                            \
     if ((rv = (__call)) != CRAWDB_OK) {             \
@@ -78,14 +86,20 @@ start - end  bytes: content
     }                                               \
 } while(0);
 
+#define return_if_err(__cond, __errv) do {          \
+    if (__cond) {                                   \
+        return (__errv);                            \
+    }                                               \
+} while(0);
+
 typedef struct crawdb_s crawdb_t;
 typedef unsigned char uchar;
 
 struct crawdb_s {
-    char *dat_path;
     char *idx_path;
-    int dat_fd;
-    int idx_fd;
+    char *dat_path;
+    int fd_idx;
+    int fd_dat;
     long idx_size;
     int locked;
     uint8_t vers;
