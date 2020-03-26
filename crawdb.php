@@ -5,12 +5,12 @@ declare(strict_types=1);
 define('CRAWDB_PHP_ERROR_FFI', -1000);
 define('CRAWDB_PHP_ERROR_HEADER', -1001);
 
-function crawdb_new(string $crawdb_h, string $libcrawdb_so, string $idx_path, string $dat_path, int $nkey): object {
-    return _crawdb_new_open($is_new = true, $crawdb_h, $libcrawdb_so, $idx_path, $dat_path, $nkey);
+function crawdb_new(string $idx_path, string $dat_path, int $nkey, ?string $crawdb_h = null, ?string $libcrawdb_so = null): object {
+    return _crawdb_new_open($idx_path, $dat_path, $nkey, $is_new = true, $crawdb_h, $libcrawdb_so);
 }
 
-function crawdb_open(string $crawdb_h, string $libcrawdb_so, string $idx_path, string $dat_path): object {
-    return _crawdb_new_open($is_new = false, $crawdb_h, $libcrawdb_so, $idx_path, $dat_path, 0);
+function crawdb_open(string $idx_path, string $dat_path, ?string $crawdb_h = null, ?string $libcrawdb_so = null): object {
+    return _crawdb_new_open($idx_path, $dat_path, 0, $is_new = false, $crawdb_h, $libcrawdb_so);
 }
 
 function crawdb_set(object $crawh, string $key, string $data): int {
@@ -77,7 +77,15 @@ function crawdb_last_error() {
     return $GLOBALS['_craw_last_error'];
 }
 
-function _crawdb_new_open(bool $is_new, string $crawdb_h, string $libcrawdb_so, string $idx_path, string $dat_path, int $nkey): object {
+function _crawdb_new_open(string $idx_path, string $dat_path, int $nkey, bool $is_new, ?string $crawdb_h, ?string $libcrawdb_so): object {
+    if ($crawdb_h === null) {
+        $crawdb_h = __DIR__ . '/crawdb.h';
+    }
+
+    if ($$libcrawdb_so === null) {
+        $libcrawdb_so = __DIR__ . '/libcrawdb.so';
+    }
+
     if (!is_readable($crawdb_h) || !is_file($crawdb_h)) {
         $GLOBALS['_craw_last_error'] = CRAWDB_PHP_ERROR_HEADER;
         return null;
@@ -138,7 +146,7 @@ function _crawdb_set_key(object $crawh, string $key): int {
 }
 
 function _crawdb_test() {
-    $crawh = crawdb_new('crawdb.h', __DIR__ . '/libcrawdb.so', '/tmp/idx', '/tmp/dat', 32);
+    $crawh = crawdb_new('/tmp/idx', '/tmp/dat', 32);
     crawdb_set($crawh, 'hello', 'world42');
     crawdb_reload($crawh);
     crawdb_index($crawh);
