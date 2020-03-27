@@ -34,6 +34,8 @@ int crawdb_set(crawdb_t *craw, uchar *key, uint32_t nkey, uchar *val, uint32_t n
     uint16_t cksum;
     uint64_t offset64;
     uint8_t dead;
+    uchar *get_val;
+    uint32_t get_nval;
 
     /* Check key len */
     goto_if_err(nkey > craw->nkey, CRAWDB_ERR_SET_BAD_KEY, crawdb_set_err);
@@ -41,16 +43,6 @@ int crawdb_set(crawdb_t *craw, uchar *key, uint32_t nkey, uchar *val, uint32_t n
 
     /* Calc checksum */
     crawdb_cksum(val, nval, &cksum);
-
-    /* Prep index record */
-    if (!craw->rec) {
-        craw->rec = malloc(craw->nrec);
-    }
-    memset(craw->rec, 0, craw->nrec);
-    memcpy(craw->rec,                   key,    nkey);  /* [0    -> n]    key    (n) */
-                                                        /* [n    -> n+8]  offset (8) (below) */
-    memcpy(craw->rec + craw->nkey + 8,  &nval,  4);     /* [n+8  -> n+12] len    (4) */
-    memcpy(craw->rec + craw->nkey + 12, &cksum, 2);     /* [n+12 -> n+14] cksum  (2) */
 
     /* Lock */
     try(_crawdb_lock(craw));
@@ -61,13 +53,28 @@ int crawdb_set(crawdb_t *craw, uchar *key, uint32_t nkey, uchar *val, uint32_t n
     goto_if_err(iorv != 1, CRAWDB_ERR_SET_PREAD_DEAD, crawdb_set_err);
     goto_if_err(dead != 0, CRAWDB_ERR_SET_IDX_DEAD, crawdb_set_err);
 
+    /* Ensure key does not already exist */
+    if (crawdb_get(craw, key, nkey, &get_val, &get_nval) == CRAWDB_OK && get_val != NULL) {
+        rv = CRAWDB_ERR_SET_ALREADY_EXISTS;
+        goto crawdb_set_err;
+    }
+
     /* Get dat offset */
     offset = lseek(craw->fd_dat, 0, SEEK_END);
     goto_if_err(offset < 0, CRAWDB_ERR_SET_LSEEK, crawdb_set_err);
 
     /* Set offset in index record */
     offset64 = (uint64_t)offset;
+
+    /* Prep index record */
+    if (!craw->rec) {
+        craw->rec = malloc(craw->nrec);
+    }
+    memset(craw->rec, 0, craw->nrec);
+    memcpy(craw->rec,                   key,    nkey);  /* [0    -> n]    key    (n) */
     memcpy(craw->rec + craw->nkey,      &offset64,  8); /* [n    -> n+8]  offset (8) */
+    memcpy(craw->rec + craw->nkey + 8,  &nval,  4);     /* [n+8  -> n+12] len    (4) */
+    memcpy(craw->rec + craw->nkey + 12, &cksum, 2);     /* [n+12 -> n+14] cksum  (2) */
 
     /* Write dat */
     iorv = write(craw->fd_dat, val, (size_t)nval);

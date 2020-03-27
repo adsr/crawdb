@@ -30,6 +30,7 @@ start - end  bytes: content
 
 #define CRAWDB_OK                      0
 #define CRAWDB_ERR                    -1
+/* i=-2; for e in $(grep -Proh 'CRAWDB_ERR_\w+' | sort | uniq); do echo "#define $e $i"; i=$((i-1)); done */
 #define CRAWDB_ERR_BAD_IDX_SIZE       -2
 #define CRAWDB_ERR_BAD_NSORTED        -3
 #define CRAWDB_ERR_BSEARCH            -4
@@ -52,22 +53,23 @@ start - end  bytes: content
 #define CRAWDB_ERR_OPEN_NKEY_ZERO     -21
 #define CRAWDB_ERR_OPEN_READ_HEADER   -22
 #define CRAWDB_ERR_OPEN_WRITE_HEADER  -23
-#define CRAWDB_ERR_SET_BAD_KEY        -24
-#define CRAWDB_ERR_SET_IDX_DEAD       -25
-#define CRAWDB_ERR_SET_LSEEK          -26
-#define CRAWDB_ERR_SET_PREAD_DEAD     -27
-#define CRAWDB_ERR_SET_WRITE_DAT      -28
-#define CRAWDB_ERR_SET_WRITE_IDX      -29
-#define CRAWDB_ERR_SORT_COPY_HEADER   -30
-#define CRAWDB_ERR_SORT_LSEEK         -31
-#define CRAWDB_ERR_SORT_OPEN_NEW      -32
-#define CRAWDB_ERR_SORT_READ          -33
-#define CRAWDB_ERR_SORT_WRITE_NSORTED -34
-#define CRAWDB_ERR_SORT_WRITE_REC     -35
-#define CRAWDB_ERR_SWAP_COPY          -36
-#define CRAWDB_ERR_SWAP_LSEEK         -37
-#define CRAWDB_ERR_SWAP_RENAME        -38
-#define CRAWDB_ERR_SWAP_WRITE_DEAD    -39
+#define CRAWDB_ERR_SET_ALREADY_EXISTS -24
+#define CRAWDB_ERR_SET_BAD_KEY        -25
+#define CRAWDB_ERR_SET_IDX_DEAD       -26
+#define CRAWDB_ERR_SET_LSEEK          -27
+#define CRAWDB_ERR_SET_PREAD_DEAD     -28
+#define CRAWDB_ERR_SET_WRITE_DAT      -29
+#define CRAWDB_ERR_SET_WRITE_IDX      -30
+#define CRAWDB_ERR_SORT_COPY_HEADER   -31
+#define CRAWDB_ERR_SORT_LSEEK         -32
+#define CRAWDB_ERR_SORT_OPEN_NEW      -33
+#define CRAWDB_ERR_SORT_READ          -34
+#define CRAWDB_ERR_SORT_WRITE_NSORTED -35
+#define CRAWDB_ERR_SORT_WRITE_REC     -36
+#define CRAWDB_ERR_SWAP_COPY          -37
+#define CRAWDB_ERR_SWAP_LSEEK         -38
+#define CRAWDB_ERR_SWAP_RENAME        -39
+#define CRAWDB_ERR_SWAP_WRITE_DEAD    -40
 
 #define CRAWDB_HEADER_SIZE             18
 #define CRAWDB_HEADER_VERS             1

@@ -1,15 +1,14 @@
-#!/usr/bin/env php
 <?php
 declare(strict_types=1);
 
 define('CRAWDB_PHP_ERROR_FFI', -1000);
 define('CRAWDB_PHP_ERROR_HEADER', -1001);
 
-function crawdb_new(string $idx_path, string $dat_path, int $nkey, ?string $crawdb_h = null, ?string $libcrawdb_so = null): object {
+function crawdb_new(string $idx_path, string $dat_path, int $nkey, ?string $crawdb_h = null, ?string $libcrawdb_so = null): ?object {
     return _crawdb_new_open($idx_path, $dat_path, $nkey, $is_new = true, $crawdb_h, $libcrawdb_so);
 }
 
-function crawdb_open(string $idx_path, string $dat_path, ?string $crawdb_h = null, ?string $libcrawdb_so = null): object {
+function crawdb_open(string $idx_path, string $dat_path, ?string $crawdb_h = null, ?string $libcrawdb_so = null): ?object {
     return _crawdb_new_open($idx_path, $dat_path, 0, $is_new = false, $crawdb_h, $libcrawdb_so);
 }
 
@@ -77,7 +76,7 @@ function crawdb_last_error() {
     return $GLOBALS['_craw_last_error'];
 }
 
-function _crawdb_new_open(string $idx_path, string $dat_path, int $nkey, bool $is_new, ?string $crawdb_h, ?string $libcrawdb_so): object {
+function _crawdb_new_open(string $idx_path, string $dat_path, int $nkey, bool $is_new, ?string $crawdb_h, ?string $libcrawdb_so): ?object {
     if ($crawdb_h === null) {
         $crawdb_h = __DIR__ . '/crawdb.h';
     }
@@ -146,17 +145,27 @@ function _crawdb_set_key(object $crawh, string $key): int {
 }
 
 function _crawdb_test() {
-    $crawh = crawdb_new('/tmp/idx', '/tmp/dat', 32);
-    crawdb_set($crawh, 'hello', 'world42');
-    crawdb_reload($crawh);
-    crawdb_index($crawh);
-    $val = crawdb_get($crawh, 'hello');
-    if ($val === 'world42') {
-        printf("PASS\n");
-    } else {
-        printf("FAIL\n");
+    $result = 'FAIL';
+    do {
+        $crawh = crawdb_new('/tmp/idx', '/tmp/dat', 32);
+        if (!$crawh) break;
+
+        crawdb_set($crawh, 'hello', 'world42');
+        crawdb_reload($crawh);
+        crawdb_index($crawh);
+        $val = crawdb_get($crawh, 'hello');
+        if ($val !== 'world42') break;
+
+        $rv = crawdb_set($crawh, 'hello', 'no dupes');
+        if ($rv !== -24) break;
+
+        $result = 'PASS';
+    } while (0);
+    if ($crawh) {
+        crawdb_free($crawh);
     }
-    crawdb_free($crawh);
+    echo "$result\n";
+    exit($result === 'PASS' ? 0 : 1);
 }
 
 if (!empty(getenv('CRAWDB_PHP_TEST', true))) {
