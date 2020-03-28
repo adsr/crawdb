@@ -297,17 +297,14 @@ static int _crawdb_get_bsearch(crawdb_t *craw, uchar *key, uint32_t nkey, int *o
 }
 
 static int _crawdb_get_lsearch(crawdb_t *craw, uchar *key, uint32_t nkey, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum) {
-    uint64_t start;
-    uint64_t end;
+    uint64_t cur;
     uint64_t look;
     uint64_t look_offset;
     int rv;
 
-    start = 0;
-    end = craw->nunsorted - 1;
-
     /* Reverse linear search unsorted idx records for key */
-    for (look = end; look >= start; look--) {
+    for (cur = 0; cur < craw->nunsorted; ++cur) {
+        look = (craw->nunsorted - 1) - cur;
         look_offset = CRAWDB_HEADER_SIZE + ((craw->nsorted + look) * craw->nrec);
         if (pread(craw->fd_idx, craw->rec, craw->nrec, look_offset) != craw->nrec) {
             return CRAWDB_ERR_LSEARCH;
