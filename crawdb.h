@@ -12,20 +12,16 @@
 #include <time.h>
 
 /*
-idx format
+  IDX FORMAT
 
-start - end  bytes: content
-    0 - 4        4: CRAW
-    4 - 5        1: vers
-    5 - 9        4: nkey
-    9 - 17       8: nsorted
-   17 - 18       1: dead
-                 [
-    0 - n        n: key
-    n - n+8      8: offset
-  n+8 - n+12     4: len
- n+12 - n+14     2: cksum
-                 ]*
+      HEADER    "CRAW":4
+                <vers:1>
+                <nkey:4>
+                <nsorted:8>
+                <dead:1>
+      SORTED    <key:nkey> <offset:8> <len:4> <cksum:2>
+                ...
+    UNSORTED    ...
 */
 
 #define CRAWDB_OK                      0
@@ -53,23 +49,24 @@ start - end  bytes: content
 #define CRAWDB_ERR_OPEN_NKEY_ZERO     -21
 #define CRAWDB_ERR_OPEN_READ_HEADER   -22
 #define CRAWDB_ERR_OPEN_WRITE_HEADER  -23
-#define CRAWDB_ERR_SET_ALREADY_EXISTS -24
-#define CRAWDB_ERR_SET_BAD_KEY        -25
-#define CRAWDB_ERR_SET_IDX_DEAD       -26
-#define CRAWDB_ERR_SET_LSEEK          -27
-#define CRAWDB_ERR_SET_PREAD_DEAD     -28
-#define CRAWDB_ERR_SET_WRITE_DAT      -29
-#define CRAWDB_ERR_SET_WRITE_IDX      -30
-#define CRAWDB_ERR_SORT_COPY_HEADER   -31
-#define CRAWDB_ERR_SORT_LSEEK         -32
-#define CRAWDB_ERR_SORT_OPEN_NEW      -33
-#define CRAWDB_ERR_SORT_READ          -34
-#define CRAWDB_ERR_SORT_WRITE_NSORTED -35
-#define CRAWDB_ERR_SORT_WRITE_REC     -36
-#define CRAWDB_ERR_SWAP_COPY          -37
-#define CRAWDB_ERR_SWAP_LSEEK         -38
-#define CRAWDB_ERR_SWAP_RENAME        -39
-#define CRAWDB_ERR_SWAP_WRITE_DEAD    -40
+#define CRAWDB_ERR_READ_IDX_RECORD    -24
+#define CRAWDB_ERR_SET_ALREADY_EXISTS -25
+#define CRAWDB_ERR_SET_BAD_KEY        -26
+#define CRAWDB_ERR_SET_IDX_DEAD       -27
+#define CRAWDB_ERR_SET_LSEEK          -28
+#define CRAWDB_ERR_SET_PREAD_DEAD     -29
+#define CRAWDB_ERR_SET_WRITE_DAT      -30
+#define CRAWDB_ERR_SET_WRITE_IDX      -31
+#define CRAWDB_ERR_SORT_COPY_HEADER   -32
+#define CRAWDB_ERR_SORT_LSEEK         -33
+#define CRAWDB_ERR_SORT_OPEN_NEW      -34
+#define CRAWDB_ERR_SORT_READ          -35
+#define CRAWDB_ERR_SORT_WRITE_NSORTED -36
+#define CRAWDB_ERR_SORT_WRITE_REC     -37
+#define CRAWDB_ERR_SWAP_COPY          -38
+#define CRAWDB_ERR_SWAP_LSEEK         -39
+#define CRAWDB_ERR_SWAP_RENAME        -40
+#define CRAWDB_ERR_SWAP_WRITE_DEAD    -41
 
 #define CRAWDB_HEADER_SIZE             18
 #define CRAWDB_HEADER_VERS             1
@@ -105,13 +102,14 @@ struct crawdb_s {
 
 CRAWDB_API int crawdb_new(char *idx_path, char *dat_path, uint32_t nkey, crawdb_t **out_craw);
 CRAWDB_API int crawdb_open(char *idx_path, char *dat_path, crawdb_t **out_craw);
+CRAWDB_API int crawdb_reload(crawdb_t *craw);
 CRAWDB_API int crawdb_set(crawdb_t *craw, uchar *key, uint32_t nkey, uchar *val, uint32_t nval);
 CRAWDB_API int crawdb_get(crawdb_t *craw, uchar *key, uint32_t nkey, uchar **out_val, uint32_t *out_nval);
-CRAWDB_API int crawdb_index(crawdb_t *craw);
+CRAWDB_API int crawdb_get_i(crawdb_t *craw, uint64_t i, uchar **out_key, uint32_t *out_nkey, uchar **out_val, uint32_t *out_nval);
 CRAWDB_API int crawdb_cksum(uchar *val, uint32_t len, uint16_t *out_cksum);
+CRAWDB_API int crawdb_index(crawdb_t *craw);
 CRAWDB_API int crawdb_get_nkey(crawdb_t *craw, uint32_t *out_nkey);
 CRAWDB_API int crawdb_get_ntotal(crawdb_t *craw, uint64_t *out_ntotal);
 CRAWDB_API int crawdb_get_nsorted(crawdb_t *craw, uint64_t *out_nsorted);
 CRAWDB_API int crawdb_get_nunsorted(crawdb_t *craw, uint64_t *out_nunsorted);
-CRAWDB_API int crawdb_reload(crawdb_t *craw);
 CRAWDB_API int crawdb_free(crawdb_t *craw);

@@ -1,7 +1,10 @@
 #include "crawdb.h"
 
-static int _crawdb_get_bsearch(crawdb_t *craw, uchar *key, uint32_t nkey, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum);
-static int _crawdb_get_lsearch(crawdb_t *craw, uchar *key, uint32_t nkey, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum);
+static int _crawdb_get_ex(crawdb_t *craw, int by_key, uchar *orig_key, uint32_t orig_nkey, uint64_t key_i, uchar **out_key, uint32_t *out_nkey, uchar **out_val, uint32_t *out_nval);
+static int _crawdb_get_bsearch(crawdb_t *craw, uchar *key, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum);
+static int _crawdb_get_lsearch(crawdb_t *craw, uchar *key, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum);
+static int _crawdb_read_idx_record(crawdb_t *craw, uint64_t key_i);
+static int _crawdb_parse_idx_record(crawdb_t *craw, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum);
 static int _crawdb_get_data(crawdb_t *craw, uint64_t offset, uint32_t len, uint16_t cksum, uchar **out_val, uint32_t *out_nval);
 static int _crawdb_index_copy(crawdb_t *craw, int *out_fd_copy, char **out_path_copy);
 static int _crawdb_index_sort_cmp(const void *a, const void *b, void *arg);
@@ -93,66 +96,12 @@ crawdb_set_err:
     return rv;
 }
 
+int crawdb_get(crawdb_t *craw, uchar *key, uint32_t nkey, uchar **out_val, uint32_t *out_nval) {
+    return _crawdb_get_ex(craw, 1, key, nkey, 0, NULL, NULL, out_val, out_nval);
+}
 
-int crawdb_get(crawdb_t *craw, uchar *orig_key, uint32_t orig_nkey, uchar **out_val, uint32_t *out_nval) {
-    int rv;
-    int rc;
-    int found;
-    uint64_t offset;
-    uint32_t len;
-    uint16_t cksum;
-    uchar *key;
-
-    /* Maybe allocate rec */
-    if (!craw->rec) {
-        craw->rec = malloc(craw->nrec);
-    }
-
-    /* Check key len */
-    goto_if_err(orig_nkey > craw->nkey, CRAWDB_ERR_GET_BAD_KEY, crawdb_get_err);
-    goto_if_err(orig_nkey < 1,          CRAWDB_ERR_GET_BAD_KEY, crawdb_get_err);
-
-    /* Maybe pad key */
-    if (orig_nkey < craw->nkey) {
-        key = calloc(1, craw->nkey); /* TODO scratch key buffer */
-        memcpy(key, orig_key, orig_nkey);
-    } else { /* orig_nkey == craw->nkey */
-        key = orig_key;
-    }
-
-    found = 0;
-
-    if (craw->nsorted > 0) {
-        /* Try binary search */
-        rc = _crawdb_get_bsearch(craw, key, craw->nkey, &found, &offset, &len, &cksum);
-        goto_if_err(rc != CRAWDB_OK, rc, crawdb_get_err);
-    }
-
-    if (!found) {
-        if (craw->nunsorted > 0) {
-            /* Try linear search */
-            rc =_crawdb_get_lsearch(craw, key, craw->nkey, &found, &offset, &len, &cksum);
-            goto_if_err(rc != CRAWDB_OK, rc, crawdb_get_err);
-        }
-    }
-
-    /* Key not found */
-    if (!found) {
-        *out_val = NULL;
-        *out_nval = 0;
-        goto crawdb_get_ok;
-    }
-
-    /* Fetch data */
-    rc = _crawdb_get_data(craw, offset, len, cksum, out_val, out_nval);
-    goto_if_err(rc != CRAWDB_OK, rc, crawdb_get_err);
-
-crawdb_get_ok:
-    if (key != orig_key) free(key); /* TODO scratch key buffer */
-    return CRAWDB_OK;
-
-crawdb_get_err:
-    return rv;
+int crawdb_get_i(crawdb_t *craw, uint64_t i, uchar **out_key, uint32_t *out_nkey, uchar **out_val, uint32_t *out_nval) {
+    return _crawdb_get_ex(craw, 0, NULL, 0, i, out_key, out_nkey, out_val, out_nval);
 }
 
 int crawdb_cksum(uchar *val, uint32_t len, uint16_t *out_cksum) {
@@ -186,7 +135,6 @@ int crawdb_cksum(uchar *val, uint32_t len, uint16_t *out_cksum) {
     *out_cksum = crc;
     return CRAWDB_OK;
 }
-
 
 int crawdb_index(crawdb_t *craw) {
     int rv;
@@ -245,11 +193,6 @@ int crawdb_get_nunsorted(crawdb_t *craw, uint64_t *out_nunsorted) {
     return CRAWDB_OK;
 }
 
-int crawdb_get_keylen(crawdb_t *craw, uint32_t *out_nkey) {
-    *out_nkey = craw->nkey;
-    return CRAWDB_OK;
-}
-
 int crawdb_free(crawdb_t *craw) {
     if (craw->fd_idx >= 0) close(craw->fd_idx);
     if (craw->fd_dat >= 0) close(craw->fd_dat);
@@ -261,11 +204,82 @@ int crawdb_free(crawdb_t *craw) {
     return CRAWDB_OK;
 }
 
-static int _crawdb_get_bsearch(crawdb_t *craw, uchar *key, uint32_t nkey, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum) {
+static int _crawdb_get_ex(crawdb_t *craw, int by_key, uchar *orig_key, uint32_t orig_nkey, uint64_t key_i, uchar **out_key, uint32_t *out_nkey, uchar **out_val, uint32_t *out_nval) {
+    int rv;
+    int rc;
+    int found;
+    uint64_t offset;
+    uint32_t len;
+    uint16_t cksum;
+    uchar *key;
+
+    key = NULL;
+
+    /* Validate key or key_i */
+    if (by_key) {
+        goto_if_err(orig_nkey > craw->nkey, CRAWDB_ERR_GET_BAD_KEY, _crawdb_get_ex_err);
+        goto_if_err(orig_nkey < 1,          CRAWDB_ERR_GET_BAD_KEY, _crawdb_get_ex_err);
+    } else {
+        goto_if_err(key_i >= craw->ntotal,  CRAWDB_ERR_GET_BAD_KEY, _crawdb_get_ex_err);
+    }
+
+    if (by_key) {
+        /* Maybe pad key */
+        if (orig_nkey < craw->nkey) {
+            key = calloc(1, craw->nkey); /* TODO scratch key buffer */
+            memcpy(key, orig_key, orig_nkey);
+        } else { /* orig_nkey == craw->nkey */
+            key = orig_key;
+        }
+
+        found = 0;
+
+        if (craw->nsorted > 0) {
+            /* Try binary search */
+            rc = _crawdb_get_bsearch(craw, key, &found, &offset, &len, &cksum);
+            goto_if_err(rc != CRAWDB_OK, rc, _crawdb_get_ex_err);
+        }
+
+        if (!found) {
+            if (craw->nunsorted > 0) {
+                /* Try linear search */
+                rc =_crawdb_get_lsearch(craw, key, &found, &offset, &len, &cksum);
+                goto_if_err(rc != CRAWDB_OK, rc, _crawdb_get_ex_err);
+            }
+        }
+
+        /* Key not found */
+        if (!found) {
+            *out_val = NULL;
+            *out_nval = 0;
+            goto _crawdb_get_ex_ok;
+        }
+    } else {
+        /* Read key at key_i */
+        rc = _crawdb_read_idx_record(craw, key_i);
+        goto_if_err(rc != CRAWDB_OK, rc, _crawdb_get_ex_err);
+        *out_key = craw->rec;
+        *out_nkey = craw->nkey;
+
+        _crawdb_parse_idx_record(craw, &offset, &len, &cksum);
+    }
+
+    /* Fetch data */
+    rc = _crawdb_get_data(craw, offset, len, cksum, out_val, out_nval);
+    goto_if_err(rc != CRAWDB_OK, rc, _crawdb_get_ex_err);
+
+_crawdb_get_ex_ok:
+    if (key && key != orig_key) free(key); /* TODO scratch key buffer */
+    return CRAWDB_OK;
+
+_crawdb_get_ex_err:
+    return rv;
+}
+
+static int _crawdb_get_bsearch(crawdb_t *craw, uchar *key, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum) {
     uint64_t start;
     uint64_t end;
     uint64_t look;
-    uint64_t look_offset;
     int rv;
 
     start = 0;
@@ -274,15 +288,10 @@ static int _crawdb_get_bsearch(crawdb_t *craw, uchar *key, uint32_t nkey, int *o
     /* Binary search sorted idx records for key */
     while (end >= start) {
         look = (start + end) / 2;
-        look_offset = CRAWDB_HEADER_SIZE + (look * craw->nrec);
-        if (pread(craw->fd_idx, craw->rec, craw->nrec, look_offset) != craw->nrec) {
-            return CRAWDB_ERR_BSEARCH;
-        }
-        rv = memcmp(craw->rec, key, nkey);
+        try(_crawdb_read_idx_record(craw, look));
+        rv = memcmp(craw->rec, key, craw->nkey);
         if (rv == 0) {
-            memcpy(out_offset, craw->rec + nkey, 8);
-            memcpy(out_len,    craw->rec + nkey + 8, 4);
-            memcpy(out_cksum,  craw->rec + nkey + 8 + 4, 2);
+            _crawdb_parse_idx_record(craw, out_offset, out_len, out_cksum);
             *out_found = 1;
             return CRAWDB_OK;
         } else if (rv < 0) {
@@ -296,30 +305,48 @@ static int _crawdb_get_bsearch(crawdb_t *craw, uchar *key, uint32_t nkey, int *o
     return CRAWDB_OK;
 }
 
-static int _crawdb_get_lsearch(crawdb_t *craw, uchar *key, uint32_t nkey, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum) {
+static int _crawdb_get_lsearch(crawdb_t *craw, uchar *key, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum) {
     uint64_t cur;
     uint64_t look;
-    uint64_t look_offset;
     int rv;
 
     /* Reverse linear search unsorted idx records for key */
     for (cur = 0; cur < craw->nunsorted; ++cur) {
         look = (craw->nunsorted - 1) - cur;
-        look_offset = CRAWDB_HEADER_SIZE + ((craw->nsorted + look) * craw->nrec);
-        if (pread(craw->fd_idx, craw->rec, craw->nrec, look_offset) != craw->nrec) {
-            return CRAWDB_ERR_LSEARCH;
-        }
-        rv = memcmp(craw->rec, key, nkey);
+        try(_crawdb_read_idx_record(craw, look));
+        rv = memcmp(craw->rec, key, craw->nkey);
         if (rv == 0) {
-            memcpy(out_offset, craw->rec + nkey, 8);
-            memcpy(out_len,    craw->rec + nkey + 8, 4);
-            memcpy(out_cksum,  craw->rec + nkey + 8 + 4, 2);
+            _crawdb_parse_idx_record(craw, out_offset, out_len, out_cksum);
             *out_found = 1;
             return CRAWDB_OK;
         }
     }
 
     *out_found = 0;
+    return CRAWDB_OK;
+}
+
+static int _crawdb_read_idx_record(crawdb_t *craw, uint64_t key_i) {
+    uint64_t offset;
+
+    /* Allocate rec if needed */
+    if (!craw->rec) {
+        craw->rec = malloc(craw->nrec);
+    }
+
+    /* Read index record */
+    offset = CRAWDB_HEADER_SIZE + (key_i * craw->nrec);
+    if (pread(craw->fd_idx, craw->rec, craw->nrec, offset) != craw->nrec) {
+        return CRAWDB_ERR_READ_IDX_RECORD;
+    }
+
+    return CRAWDB_OK;
+}
+
+static int _crawdb_parse_idx_record(crawdb_t *craw, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum) {
+    memcpy(out_offset, craw->rec + craw->nkey, 8);
+    memcpy(out_len,    craw->rec + craw->nkey + 8, 4);
+    memcpy(out_cksum,  craw->rec + craw->nkey + 8 + 4, 2);
     return CRAWDB_OK;
 }
 
