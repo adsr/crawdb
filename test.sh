@@ -30,4 +30,8 @@ ok=0
 ./crawdb -i $test_dir/idx -d $test_dir/dat -S -k key2 -v again || ok=1
 [ "$ok" -eq 1 ]
 
+# Write and read unsorted key after sorted keys
+./crawdb -i $test_dir/idx -d $test_dir/dat -S -k key3 -v hi
+[ "$(./crawdb -i $test_dir/idx -d $test_dir/dat -G -k key3)" = "hi" ]
+
 pass=1

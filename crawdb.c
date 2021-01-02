@@ -312,7 +312,7 @@ static int _crawdb_get_lsearch(crawdb_t *craw, uchar *key, int *out_found, uint6
 
     /* Reverse linear search unsorted idx records for key */
     for (cur = 0; cur < craw->nunsorted; ++cur) {
-        look = (craw->nunsorted - 1) - cur;
+        look = (craw->ntotal - 1) - cur;
         try(_crawdb_read_idx_record(craw, look));
         rv = memcmp(craw->rec, key, craw->nkey);
         if (rv == 0) {
