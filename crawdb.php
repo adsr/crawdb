@@ -155,7 +155,7 @@ function _crawdb_new_open(string $idx_path, string $dat_path, int $nkey, bool $i
         $crawdb_h = __DIR__ . '/crawdb.h';
     }
 
-    if ($$libcrawdb_so === null) {
+    if ($libcrawdb_so === null) {
         $libcrawdb_so = __DIR__ . '/libcrawdb.so';
     }
 

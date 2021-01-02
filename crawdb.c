@@ -697,6 +697,7 @@ void usage(FILE *fp, int exit_code) {
     fprintf(fp, "  crawdb -i <idx> -d <dat> -S -k key -v val\n");
     fprintf(fp, "  crawdb -i <idx> -d <dat> -G -k key\n");
     fprintf(fp, "  crawdb -i <idx> -d <dat> -I\n");
+    fprintf(fp, "  crawdb -i <idx> -d <dat> -D\n");
     fprintf(fp, "\n");
     fprintf(fp, "Options:\n");
     fprintf(fp, "  -h, --help             Show this help\n");
@@ -704,6 +705,7 @@ void usage(FILE *fp, int exit_code) {
     fprintf(fp, "  -S, --action-set       Set data (use with -k, -v)\n");
     fprintf(fp, "  -G, --action-get       Get data (use with -k)\n");
     fprintf(fp, "  -I, --action-index     Index a database\n");
+    fprintf(fp, "  -D, --action-dump      Dump all key-vals in database\n");
     fprintf(fp, "  -i, --path-idx=<path>  Use index file at `path`\n");
     fprintf(fp, "  -d, --path-dat=<path>  Use data file at `path`\n");
     fprintf(fp, "  -k, --key=<key>        Set or get `key`\n");
@@ -725,6 +727,8 @@ int main(int argc, char **argv) {
     uchar *oval;
     uint32_t nkey;
     uint32_t nval;
+    uint64_t ntotal;
+    uint64_t i;
 
     action = 0;
     dat = NULL;
@@ -737,6 +741,8 @@ int main(int argc, char **argv) {
     oval = NULL;
     nkey = 0;
     nval = 0;
+    ntotal = 0;
+    i = 0;
 
     struct option long_opts[] = {
         { "help",         no_argument,       NULL, 'h' },
@@ -752,7 +758,7 @@ int main(int argc, char **argv) {
         { 0,              0,                 0,    0   }
     };
 
-    while ((c = getopt_long(argc, argv, "hi:d:k:v:NSGIn:", long_opts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "hi:d:k:v:NSGIDn:", long_opts, NULL)) != -1) {
         switch (c) {
             case 'h': help = 1;      break;
             case 'i': idx = optarg;  break;
@@ -762,7 +768,8 @@ int main(int argc, char **argv) {
             case 'N':
             case 'S':
             case 'G':
-            case 'I': action = c;    break;
+            case 'I':
+            case 'D': action = c;    break;
             case 'n': nkey = strtol(optarg, NULL, 10); break;
         }
     }
@@ -776,7 +783,7 @@ int main(int argc, char **argv) {
         usage(stderr, 0);
     }
 
-    if (strchr("SGI", action) != NULL) {
+    if (strchr("SGID", action) != NULL) {
         if ((rv = crawdb_open(idx, dat, &craw)) != CRAWDB_OK) {
             goto main_err;
         }
@@ -816,6 +823,19 @@ int main(int argc, char **argv) {
         case 'I':
             /* INDEX */
             rv = crawdb_index(craw);
+            break;
+
+        case 'D':
+            /* DUMP */
+            if ((rv = crawdb_get_ntotal(craw, &ntotal)) != CRAWDB_OK) {
+                goto main_err;
+            }
+            for (i = 0; i < ntotal; i++) {
+                if ((rv = crawdb_get_i(craw, i, (uchar**)&key, &nkey, &oval, &nval)) != CRAWDB_OK) {
+                    goto main_err;
+                }
+                printf("%-*.*s %-.*s\n", nkey, nkey, key, nval, oval);
+            }
             break;
 
         default:
