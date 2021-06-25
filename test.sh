@@ -34,4 +34,8 @@ ok=0
 ./crawdb -i $test_dir/idx -d $test_dir/dat -S -k key3 -v hi
 [ "$(./crawdb -i $test_dir/idx -d $test_dir/dat -G -k key3)" = "hi" ]
 
+# Delete key and ensure it no longer exists
+./crawdb -i $test_dir/idx -d $test_dir/dat -X -k key3
+[ "$(./crawdb -i $test_dir/idx -d $test_dir/dat -G -k key3)" = "" ]
+
 pass=1

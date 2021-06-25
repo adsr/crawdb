@@ -42,7 +42,8 @@ function crawdb_get(object $crawh, string $key): ?string {
         $crawh->key,
         $crawh->nkey->cdata,
         FFI::addr($crawh->get_val),
-        FFI::addr($crawh->get_nval)
+        FFI::addr($crawh->get_nval),
+        FFI::addr($crawh->get_key_i)
     );
     if ($crawh->last_error !== 0) {
         return null;
@@ -88,6 +89,18 @@ function crawdb_get_i(object $crawh, int $i, string &$key_data): ?string {
     }
 
     return $get_data;
+}
+
+function crawdb_delete(object $crawh, string $key): int {
+    $nkey = _crawdb_set_key($crawh, $key);
+
+    $crawh->last_error = $crawh->ffi->crawdb_delete(
+        $crawh->craw,
+        $crawh->key,
+        $crawh->nkey->cdata,
+    );
+
+    return $crawh->last_error;
 }
 
 function crawdb_get_ntotal(object $crawh): int {
@@ -183,6 +196,7 @@ function _crawdb_new_open(string $idx_path, string $dat_path, int $nkey, bool $i
     $crawh->nval = 0;
     $crawh->get_val = $ffi->new('uchar*');
     $crawh->get_nval = $ffi->new('uint32_t');
+    $crawh->get_key_i = $ffi->new('uint64_t');
     $crawh->key_val = $ffi->new('uchar*');
     $crawh->key_nval = $ffi->new('uint32_t');
     $crawh->ffi = $ffi;
@@ -250,6 +264,12 @@ function _crawdb_test() {
 
         $rv = crawdb_set($crawh, 'hello', 'no dupes');
         if ($rv !== -25) break;
+
+        $rv = crawdb_delete($crawh, 'hello');
+        if ($rv !== 0) break;
+
+        $val = crawdb_get($crawh, 'hello');
+        if ($val !== null) break;
 
         $result = 'PASS';
     } while (0);

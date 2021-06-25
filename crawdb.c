@@ -1,10 +1,10 @@
 #include "crawdb.h"
 
-static int _crawdb_get_ex(crawdb_t *craw, int by_key, uchar *orig_key, uint32_t orig_nkey, uint64_t key_i, uchar **out_key, uint32_t *out_nkey, uchar **out_val, uint32_t *out_nval);
-static int _crawdb_get_bsearch(crawdb_t *craw, uchar *key, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum);
-static int _crawdb_get_lsearch(crawdb_t *craw, uchar *key, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum);
+static int _crawdb_get_ex(crawdb_t *craw, int by_key, uchar *orig_key, uint32_t orig_nkey, uint64_t key_i, uchar **out_key, uint32_t *out_nkey, uchar **out_val, uint32_t *out_nval, uint64_t *out_key_i);
+static int _crawdb_get_bsearch(crawdb_t *craw, uchar *key, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum, uint8_t *out_del, uint64_t *out_key_i);
+static int _crawdb_get_lsearch(crawdb_t *craw, uchar *key, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum, uint8_t *out_del, uint64_t *out_key_i);
 static int _crawdb_read_idx_record(crawdb_t *craw, uint64_t key_i);
-static int _crawdb_parse_idx_record(crawdb_t *craw, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum);
+static int _crawdb_parse_idx_record(crawdb_t *craw, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum, uint8_t *out_del);
 static int _crawdb_get_data(crawdb_t *craw, uint64_t offset, uint32_t len, uint16_t cksum, uchar **out_val, uint32_t *out_nval);
 static int _crawdb_index_copy(crawdb_t *craw, int *out_fd_copy, char **out_path_copy);
 static int _crawdb_index_sort_cmp(const void *a, const void *b, void *arg);
@@ -39,6 +39,8 @@ int crawdb_set(crawdb_t *craw, uchar *key, uint32_t nkey, uchar *val, uint32_t n
     uint8_t dead;
     uchar *get_val;
     uint32_t get_nval;
+    uint8_t deleted;
+    uint64_t key_i;
 
     /* Check key len */
     goto_if_err(nkey > craw->nkey, CRAWDB_ERR_SET_BAD_KEY, crawdb_set_err);
@@ -57,7 +59,7 @@ int crawdb_set(crawdb_t *craw, uchar *key, uint32_t nkey, uchar *val, uint32_t n
     goto_if_err(dead != 0, CRAWDB_ERR_SET_IDX_DEAD, crawdb_set_err);
 
     /* Ensure key does not already exist */
-    if (crawdb_get(craw, key, nkey, &get_val, &get_nval) == CRAWDB_OK && get_val != NULL) {
+    if (crawdb_get(craw, key, nkey, &get_val, &get_nval, &key_i) == CRAWDB_OK && get_val != NULL) {
         rv = CRAWDB_ERR_SET_ALREADY_EXISTS;
         goto crawdb_set_err;
     }
@@ -73,11 +75,13 @@ int crawdb_set(crawdb_t *craw, uchar *key, uint32_t nkey, uchar *val, uint32_t n
     if (!craw->rec) {
         craw->rec = malloc(craw->nrec);
     }
+    deleted = 0;
     memset(craw->rec, 0, craw->nrec);
     memcpy(craw->rec,                   key,    nkey);  /* [0    -> n]    key    (n) */
     memcpy(craw->rec + craw->nkey,      &offset64,  8); /* [n    -> n+8]  offset (8) */
     memcpy(craw->rec + craw->nkey + 8,  &nval,  4);     /* [n+8  -> n+12] len    (4) */
     memcpy(craw->rec + craw->nkey + 12, &cksum, 2);     /* [n+12 -> n+14] cksum  (2) */
+    memcpy(craw->rec + craw->nkey + 14, &deleted, 1);   /* [n+14 -> n+15] del    (1) */
 
     /* Write dat */
     iorv = write(craw->fd_dat, val, (size_t)nval);
@@ -96,12 +100,66 @@ crawdb_set_err:
     return rv;
 }
 
-int crawdb_get(crawdb_t *craw, uchar *key, uint32_t nkey, uchar **out_val, uint32_t *out_nval) {
-    return _crawdb_get_ex(craw, 1, key, nkey, 0, NULL, NULL, out_val, out_nval);
+int crawdb_delete(crawdb_t *craw, uchar *key, uint32_t nkey) {
+    int rv;
+    ssize_t iorv;
+    uint8_t dead;
+    uchar *get_val;
+    uint32_t get_nval;
+    uint64_t deleted_offset;
+    uint8_t deleted_val;
+    uint64_t key_i;
+
+    /* Check key len */
+    goto_if_err(nkey > craw->nkey, CRAWDB_ERR_SET_BAD_KEY, crawdb_delete_err);
+    goto_if_err(nkey < 1,          CRAWDB_ERR_SET_BAD_KEY, crawdb_delete_err);
+
+    /* Lock */
+    try(_crawdb_lock(craw));
+
+    /* Reload without O_APPEND */
+    rv = _crawdb_reload_for_index(craw);
+    goto_if_err(rv != CRAWDB_OK, rv, crawdb_delete_err);
+
+    /* Check dead flag */
+    dead = 0;
+    iorv = pread(craw->fd_idx, &dead, 1, CRAWDB_OFFSET_DEAD);
+    goto_if_err(iorv != 1, CRAWDB_ERR_SET_PREAD_DEAD, crawdb_delete_err);
+    goto_if_err(dead != 0, CRAWDB_ERR_SET_IDX_DEAD, crawdb_delete_err);
+
+    /* Get key index */
+    if (crawdb_get(craw, key, nkey, &get_val, &get_nval, &key_i) != CRAWDB_OK || get_val == NULL) {
+        rv = CRAWDB_ERR_DELETE_NOT_FOUND;
+        goto crawdb_delete_err;
+    }
+
+    /* Set del flag on index record */
+    deleted_offset = CRAWDB_HEADER_SIZE + (key_i * craw->nrec) + craw->nkey + 8 + 4 + 2;
+    deleted_val = 1;
+    if (pwrite(craw->fd_idx, &deleted_val, 1, (off_t)deleted_offset) != 1) {
+        rv = CRAWDB_ERR_DELETE_WRITE_FLAG;
+        goto crawdb_delete_err;
+    }
+
+    /* Reload for O_APPEND */
+    rv = crawdb_reload(craw);
+    goto_if_err(rv != CRAWDB_OK, rv, crawdb_delete_err);
+
+    /* Unlock */
+    try(_crawdb_unlock(craw));
+    return CRAWDB_OK;
+
+crawdb_delete_err:
+    _crawdb_unlock_if_locked(craw);
+    return rv;
+}
+
+int crawdb_get(crawdb_t *craw, uchar *key, uint32_t nkey, uchar **out_val, uint32_t *out_nval, uint64_t *out_key_i) {
+    return _crawdb_get_ex(craw, 1, key, nkey, 0, NULL, NULL, out_val, out_nval, out_key_i);
 }
 
 int crawdb_get_i(crawdb_t *craw, uint64_t i, uchar **out_key, uint32_t *out_nkey, uchar **out_val, uint32_t *out_nval) {
-    return _crawdb_get_ex(craw, 0, NULL, 0, i, out_key, out_nkey, out_val, out_nval);
+    return _crawdb_get_ex(craw, 0, NULL, 0, i, out_key, out_nkey, out_val, out_nval, &i);
 }
 
 int crawdb_cksum(uchar *val, uint32_t len, uint16_t *out_cksum) {
@@ -204,7 +262,7 @@ int crawdb_free(crawdb_t *craw) {
     return CRAWDB_OK;
 }
 
-static int _crawdb_get_ex(crawdb_t *craw, int by_key, uchar *orig_key, uint32_t orig_nkey, uint64_t key_i, uchar **out_key, uint32_t *out_nkey, uchar **out_val, uint32_t *out_nval) {
+static int _crawdb_get_ex(crawdb_t *craw, int by_key, uchar *orig_key, uint32_t orig_nkey, uint64_t key_i, uchar **out_key, uint32_t *out_nkey, uchar **out_val, uint32_t *out_nval, uint64_t *out_key_i) {
     int rv;
     int rc;
     int found;
@@ -212,6 +270,7 @@ static int _crawdb_get_ex(crawdb_t *craw, int by_key, uchar *orig_key, uint32_t 
     uint32_t len;
     uint16_t cksum;
     uchar *key;
+    uint8_t del;
 
     key = NULL;
 
@@ -236,14 +295,14 @@ static int _crawdb_get_ex(crawdb_t *craw, int by_key, uchar *orig_key, uint32_t 
 
         if (craw->nsorted > 0) {
             /* Try binary search */
-            rc = _crawdb_get_bsearch(craw, key, &found, &offset, &len, &cksum);
+            rc = _crawdb_get_bsearch(craw, key, &found, &offset, &len, &cksum, &del, out_key_i);
             goto_if_err(rc != CRAWDB_OK, rc, _crawdb_get_ex_err);
         }
 
         if (!found) {
             if (craw->nunsorted > 0) {
                 /* Try linear search */
-                rc =_crawdb_get_lsearch(craw, key, &found, &offset, &len, &cksum);
+                rc =_crawdb_get_lsearch(craw, key, &found, &offset, &len, &cksum, &del, out_key_i);
                 goto_if_err(rc != CRAWDB_OK, rc, _crawdb_get_ex_err);
             }
         }
@@ -260,8 +319,16 @@ static int _crawdb_get_ex(crawdb_t *craw, int by_key, uchar *orig_key, uint32_t 
         goto_if_err(rc != CRAWDB_OK, rc, _crawdb_get_ex_err);
         *out_key = craw->rec;
         *out_nkey = craw->nkey;
+        *out_key_i = key_i;
 
-        _crawdb_parse_idx_record(craw, &offset, &len, &cksum);
+        _crawdb_parse_idx_record(craw, &offset, &len, &cksum, &del);
+    }
+
+    if (del) {
+        /* TODO different return for deleted keys? */
+        *out_val = NULL;
+        *out_nval = 0;
+        goto _crawdb_get_ex_ok;
     }
 
     /* Fetch data */
@@ -276,7 +343,7 @@ _crawdb_get_ex_err:
     return rv;
 }
 
-static int _crawdb_get_bsearch(crawdb_t *craw, uchar *key, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum) {
+static int _crawdb_get_bsearch(crawdb_t *craw, uchar *key, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum, uint8_t *out_del, uint64_t *out_key_i) {
     uint64_t start;
     uint64_t end;
     uint64_t look;
@@ -291,7 +358,8 @@ static int _crawdb_get_bsearch(crawdb_t *craw, uchar *key, int *out_found, uint6
         try(_crawdb_read_idx_record(craw, look));
         rv = memcmp(craw->rec, key, craw->nkey);
         if (rv == 0) {
-            _crawdb_parse_idx_record(craw, out_offset, out_len, out_cksum);
+            _crawdb_parse_idx_record(craw, out_offset, out_len, out_cksum, out_del);
+            *out_key_i = look;
             *out_found = 1;
             return CRAWDB_OK;
         } else if (rv < 0) {
@@ -305,7 +373,7 @@ static int _crawdb_get_bsearch(crawdb_t *craw, uchar *key, int *out_found, uint6
     return CRAWDB_OK;
 }
 
-static int _crawdb_get_lsearch(crawdb_t *craw, uchar *key, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum) {
+static int _crawdb_get_lsearch(crawdb_t *craw, uchar *key, int *out_found, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum, uint8_t *out_del, uint64_t *out_key_i) {
     uint64_t cur;
     uint64_t look;
     int rv;
@@ -316,7 +384,8 @@ static int _crawdb_get_lsearch(crawdb_t *craw, uchar *key, int *out_found, uint6
         try(_crawdb_read_idx_record(craw, look));
         rv = memcmp(craw->rec, key, craw->nkey);
         if (rv == 0) {
-            _crawdb_parse_idx_record(craw, out_offset, out_len, out_cksum);
+            _crawdb_parse_idx_record(craw, out_offset, out_len, out_cksum, out_del);
+            *out_key_i = look;
             *out_found = 1;
             return CRAWDB_OK;
         }
@@ -343,10 +412,11 @@ static int _crawdb_read_idx_record(crawdb_t *craw, uint64_t key_i) {
     return CRAWDB_OK;
 }
 
-static int _crawdb_parse_idx_record(crawdb_t *craw, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum) {
+static int _crawdb_parse_idx_record(crawdb_t *craw, uint64_t *out_offset, uint32_t *out_len, uint16_t *out_cksum, uint8_t *out_del) {
     memcpy(out_offset, craw->rec + craw->nkey, 8);
     memcpy(out_len,    craw->rec + craw->nkey + 8, 4);
     memcpy(out_cksum,  craw->rec + craw->nkey + 8 + 4, 2);
+    memcpy(out_del,    craw->rec + craw->nkey + 8 + 4 + 2, 1);
     return CRAWDB_OK;
 }
 
@@ -480,6 +550,7 @@ static int _crawdb_index_sort(crawdb_t *craw, char *path_copy, int *inout_fd_cop
 
     /* Write sorted records to new */
     for (i = 0; i < craw->ntotal; i++) {
+        /* TODO skip deleted keys? */
         iorv = pwrite(fd_new, buf + (craw->nrec * i), craw->nrec, CRAWDB_HEADER_SIZE + (craw->nrec * i));
         goto_if_err(iorv != craw->nrec, CRAWDB_ERR_SORT_WRITE_REC, _crawdb_index_sort_err);
     }
@@ -629,7 +700,7 @@ static int _crawdb_open(int is_new, int for_index, crawdb_t *reload, char *idx_p
     memcpy(&craw->nkey, header + 5, 4); /* TODO endianness */
     memcpy(&craw->nsorted, header + 9, 8);
     craw->dead = (uint8_t)header[CRAWDB_OFFSET_DEAD];
-    craw->nrec = craw->nkey + 8 + 4 + 2; /* key (nkey) + offset (8) + len (4) + cksum (2) */
+    craw->nrec = craw->nkey + 8 + 4 + 2 + 1; /* key (nkey) + offset (8) + len (4) + cksum (2) + del (1) */
 
     /* Get index size */
     idx_size = lseek(fd_idx, 0, SEEK_END);
@@ -696,6 +767,7 @@ void usage(FILE *fp, int exit_code) {
     fprintf(fp, "  crawdb -i <idx> -d <dat> -N\n");
     fprintf(fp, "  crawdb -i <idx> -d <dat> -S -k key -v val\n");
     fprintf(fp, "  crawdb -i <idx> -d <dat> -G -k key\n");
+    fprintf(fp, "  crawdb -i <idx> -d <dat> -X -k key\n");
     fprintf(fp, "  crawdb -i <idx> -d <dat> -I\n");
     fprintf(fp, "  crawdb -i <idx> -d <dat> -D\n");
     fprintf(fp, "\n");
@@ -704,6 +776,7 @@ void usage(FILE *fp, int exit_code) {
     fprintf(fp, "  -N, --action-init      Init a database (use with -n)\n");
     fprintf(fp, "  -S, --action-set       Set data (use with -k, -v)\n");
     fprintf(fp, "  -G, --action-get       Get data (use with -k)\n");
+    fprintf(fp, "  -X, --action-delete    Remove data (use with -k)\n");
     fprintf(fp, "  -I, --action-index     Index a database\n");
     fprintf(fp, "  -D, --action-dump      Dump all key-vals in database\n");
     fprintf(fp, "  -i, --path-idx=<path>  Use index file at `path`\n");
@@ -745,20 +818,21 @@ int main(int argc, char **argv) {
     i = 0;
 
     struct option long_opts[] = {
-        { "help",         no_argument,       NULL, 'h' },
-        { "path-idx",     required_argument, NULL, 'i' },
-        { "path-dat",     required_argument, NULL, 'd' },
-        { "key",          required_argument, NULL, 'k' },
-        { "val",          required_argument, NULL, 'v' },
-        { "action-init",  no_argument,       NULL, 'N' },
-        { "action-set",   no_argument,       NULL, 'S' },
-        { "action-get",   no_argument,       NULL, 'G' },
-        { "action-index", no_argument,       NULL, 'I' },
-        { "key-size",     required_argument, NULL, 'n' },
-        { 0,              0,                 0,    0   }
+        { "help",          no_argument,       NULL, 'h' },
+        { "path-idx",      required_argument, NULL, 'i' },
+        { "path-dat",      required_argument, NULL, 'd' },
+        { "key",           required_argument, NULL, 'k' },
+        { "val",           required_argument, NULL, 'v' },
+        { "action-init",   no_argument,       NULL, 'N' },
+        { "action-set",    no_argument,       NULL, 'S' },
+        { "action-get",    no_argument,       NULL, 'G' },
+        { "action-delete", no_argument,       NULL, 'X' },
+        { "action-index",  no_argument,       NULL, 'I' },
+        { "key-size",      required_argument, NULL, 'n' },
+        { 0,               0,                 0,    0   }
     };
 
-    while ((c = getopt_long(argc, argv, "hi:d:k:v:NSGIDn:", long_opts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "hi:d:k:v:NSGXIDn:", long_opts, NULL)) != -1) {
         switch (c) {
             case 'h': help = 1;      break;
             case 'i': idx = optarg;  break;
@@ -768,6 +842,7 @@ int main(int argc, char **argv) {
             case 'N':
             case 'S':
             case 'G':
+            case 'X':
             case 'I':
             case 'D': action = c;    break;
             case 'n': nkey = strtol(optarg, NULL, 10); break;
@@ -783,7 +858,7 @@ int main(int argc, char **argv) {
         usage(stderr, 0);
     }
 
-    if (strchr("SGID", action) != NULL) {
+    if (strchr("SGXID", action) != NULL) {
         if ((rv = crawdb_open(idx, dat, &craw)) != CRAWDB_OK) {
             goto main_err;
         }
@@ -811,13 +886,19 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "Expected `--key` with `--action-get`\n");
                 usage(stderr, 1);
             }
-            if ((rv = crawdb_open(idx, dat, &craw)) != CRAWDB_OK) {
-                goto main_err;
-            }
-            rv = crawdb_get(craw, (uchar*)key, strlen(key), &oval, &nval);
+            rv = crawdb_get(craw, (uchar*)key, strlen(key), &oval, &nval, &i);
             if (rv == CRAWDB_OK) {
                 write(STDOUT_FILENO, oval, nval);
             }
+            break;
+
+        case 'X':
+            /* DELETE */
+            if (!key) {
+                fprintf(stderr, "Expected `--key` with `--action-delete`\n");
+                usage(stderr, 1);
+            }
+            rv = crawdb_delete(craw, (uchar*)key, strlen(key));
             break;
 
         case 'I':

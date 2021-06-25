@@ -19,7 +19,7 @@
                 <nkey:4>
                 <nsorted:8>
                 <dead:1>
-      SORTED    <key:nkey> <offset:8> <len:4> <cksum:2>
+      SORTED    <key:nkey> <offset:8> <len:4> <cksum:2> <del:1>
                 ...
     UNSORTED    ...
 */
@@ -67,6 +67,9 @@
 #define CRAWDB_ERR_SWAP_LSEEK         -39
 #define CRAWDB_ERR_SWAP_RENAME        -40
 #define CRAWDB_ERR_SWAP_WRITE_DEAD    -41
+#define CRAWDB_ERR_DELETE_NOT_FOUND   -42
+#define CRAWDB_ERR_DELETE_WRITE_FLAG  -43
+#define CRAWDB_ERR_DELETE_RELOAD      -44
 
 #define CRAWDB_HEADER_SIZE             18
 #define CRAWDB_HEADER_VERS             1
@@ -104,7 +107,8 @@ CRAWDB_API int crawdb_new(char *idx_path, char *dat_path, uint32_t nkey, crawdb_
 CRAWDB_API int crawdb_open(char *idx_path, char *dat_path, crawdb_t **out_craw);
 CRAWDB_API int crawdb_reload(crawdb_t *craw);
 CRAWDB_API int crawdb_set(crawdb_t *craw, uchar *key, uint32_t nkey, uchar *val, uint32_t nval);
-CRAWDB_API int crawdb_get(crawdb_t *craw, uchar *key, uint32_t nkey, uchar **out_val, uint32_t *out_nval);
+CRAWDB_API int crawdb_get(crawdb_t *craw, uchar *key, uint32_t nkey, uchar **out_val, uint32_t *out_nval, uint64_t *out_idx);
+CRAWDB_API int crawdb_delete(crawdb_t *craw, uchar *key, uint32_t nkey);
 CRAWDB_API int crawdb_get_i(crawdb_t *craw, uint64_t i, uchar **out_key, uint32_t *out_nkey, uchar **out_val, uint32_t *out_nval);
 CRAWDB_API int crawdb_cksum(uchar *val, uint32_t len, uint16_t *out_cksum);
 CRAWDB_API int crawdb_index(crawdb_t *craw);
